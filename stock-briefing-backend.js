@@ -191,11 +191,11 @@ function generateInsight(stockData) {
   insight += `Current: $${quote.price.toFixed(2)}\n`;
   insight += `Change: ${quote.change.toFixed(2)} (${quote.changePercent.toFixed(2)}%)\n`;
   insight += `52W High: ${quote.high.toFixed(2)} | 52W Low: ${quote.low.toFixed(2)}\n`;
-  insight += `Volume: ${(quote.volume / 1000000).toFixed(2)}M\n\n`;
+  insight += `Volume: ${quote.volume ? (quote.volume / 1000000).toFixed(2) + 'M' : 'N/A'}\n`;
 
   insight += `📊 FUNDAMENTALS\n`;
   insight += `PE Ratio: ${profile.pe !== 'N/A' ? profile.pe.toFixed(2) : 'N/A'}\n`;
-  insight += `Market Cap: $${profile.marketCap ? (profile.marketCap / 1000000000).toFixed(2) + 'B' : 'N/A'}\n`;
+  insight += `Market Cap: ${profile.marketCap ? '$' + (profile.marketCap / 1000000000).toFixed(2) + 'B' : 'N/A'}\n`;
   insight += `Industry: ${profile.industry}\n\n`;
 
   if (recommendations) {
