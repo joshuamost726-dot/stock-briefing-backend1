@@ -48,6 +48,18 @@ def get_col(row, *names):
     return None
 
 
+def to_number(val):
+    """Convert a value that might be a string like '1,234' into a real number."""
+    if val is None:
+        return None
+    if isinstance(val, (int, float)):
+        return val
+    try:
+        return float(str(val).replace(",", "").strip())
+    except (ValueError, TypeError):
+        return None
+
+
 def fetch_executive_compensation(ticker, conn):
     try:
         company = Company(ticker)
@@ -106,7 +118,11 @@ def fetch_institutional_holdings(fund_name, cik, tracked_tickers, conn):
             print(f"  no 13F-HR found for {fund_name}")
             return
 
-        latest = filings.latest().obj()
+        sorted_filings = sorted(filings, key=lambda f: f.filing_date, reverse=True)
+        latest_filing = sorted_filings[0]
+        prior_filing = sorted_filings[1] if len(sorted_filings) > 1 else None
+
+        latest = latest_filing.obj()
         if latest is None or not getattr(latest, "has_infotable", False):
             print(f"  {fund_name}: latest 13F-HR has no infotable data — skipping")
             return
@@ -114,12 +130,10 @@ def fetch_institutional_holdings(fund_name, cik, tracked_tickers, conn):
         holdings_df = latest.infotable
 
         prior_df = None
-        try:
-            prior = latest.previous_holding_report()
-            if prior is not None and getattr(prior, "has_infotable", False):
-                prior_df = prior.infotable
-        except Exception:
-            prior_df = None
+        if prior_filing is not None:
+            prior_obj = prior_filing.obj()
+            if prior_obj is not None and getattr(prior_obj, "has_infotable", False):
+                prior_df = prior_obj.infotable
 
         report_period = getattr(latest, "report_period", None)
 
@@ -130,16 +144,16 @@ def fetch_institutional_holdings(fund_name, cik, tracked_tickers, conn):
                 continue
 
             cusip = get_col(h, "Cusip")
-            shares = get_col(h, "SharesPrnAmount", "Shares")
-            value = get_col(h, "Value")
+            shares = to_number(get_col(h, "SharesPrnAmount", "Shares"))
+            value = to_number(get_col(h, "Value"))
 
             prior_shares = None
             if prior_df is not None and "Cusip" in prior_df.columns:
                 match = prior_df[prior_df["Cusip"] == cusip]
                 if not match.empty:
-                    prior_shares = get_col(match.iloc[0], "SharesPrnAmount", "Shares")
+                    prior_shares = to_number(get_col(match.iloc[0], "SharesPrnAmount", "Shares"))
 
-            pct_change = ((shares - prior_shares) / prior_shares * 100) if prior_shares else None
+            pct_change = ((shares - prior_shares) / prior_shares * 100) if (shares is not None and prior_shares) else None
 
             rows.append((
                 cik, fund_name, ticker, shares, value,
@@ -149,40 +163,3 @@ def fetch_institutional_holdings(fund_name, cik, tracked_tickers, conn):
         if rows:
             with conn.cursor() as cur:
                 execute_values(cur, """
-                    INSERT INTO institutional_holdings
-                        (fund_cik, fund_name, ticker, shares_held, value_usd,
-                         filing_period, prior_shares_held, pct_change)
-                    VALUES %s
-                    ON CONFLICT (fund_cik, ticker, filing_period)
-                    DO UPDATE SET shares_held = EXCLUDED.shares_held,
-                                  pct_change = EXCLUDED.pct_change, fetched_at = NOW()
-                """, rows)
-            conn.commit()
-        print(f"  {fund_name}: wrote {len(rows)} holdings rows (tracked tickers only)")
-
-    except Exception as e:
-        print(f"  ERROR fetching 13F for {fund_name}: {e}")
-        conn.rollback()
-
-
-def main():
-    conn = get_db_connection()
-
-    print("Fetching executive compensation...")
-    for ticker in TRACKED_TICKERS:
-        fetch_executive_compensation(ticker, conn)
-
-    print("\nFetching institutional holdings...")
-    for fund in SMART_MONEY_WATCHLIST:
-        cik = fund["cik"] or resolve_cik_by_name(fund["name"])
-        if not cik:
-            print(f"  could not resolve CIK for {fund['name']}, skipping")
-            continue
-        fetch_institutional_holdings(fund["name"], cik, TRACKED_TICKERS, conn)
-
-    conn.close()
-    print("\nDone.")
-
-
-if __name__ == "__main__":
-    main()
