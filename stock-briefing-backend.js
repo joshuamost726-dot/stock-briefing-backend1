@@ -358,18 +358,26 @@ app.get('/api/briefing/latest', async (req, res) => {
       data.stocks.map(stock => getStockData(stock.ticker))
     );
 
-    // Attach conviction score to each stock
+   // Attach conviction score to each stock
     for (const stock of stocksData) {
+      const scores = [];
+
       try {
-        const signal = await getInstitutionalBuyingSignal(stock.ticker);
-        stock.convictionScore = signal?.confidenceScore ?? 0;
-stock.tierLabel = signal?.label ?? 'No Data';
-        stock.explanation = signal?.explanation ?? 'No signal data available';
+        const inst = await getInstitutionalBuyingSignal(stock.ticker);
+        if (inst && inst.confidenceScore > 0) scores.push(inst.confidenceScore);
+        stock.explanation = inst?.explanation ?? 'No signal data available';
       } catch (err) {
-        console.error(`Conviction score failed for ${stock.ticker}:`, err.message);
-        stock.convictionScore = 0;
+        console.error(`Institutional signal failed for ${stock.ticker}:`, err);
         stock.explanation = 'Score unavailable';
       }
+
+      const analyst = getAnalystSignal(stock.recommendations);
+      if (analyst) scores.push(analyst.score);
+
+      stock.activeSignals = scores.length;
+      stock.convictionScore = scores.length
+        ? Math.round(scores.reduce((a, b) => a + b, 0) / scores.length)
+        : 0;
     }
 
     let briefing = '📈 STOCK BRIEFING REPORT\n';
