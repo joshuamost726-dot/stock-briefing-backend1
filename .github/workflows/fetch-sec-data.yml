@@ -22,3 +22,8 @@ jobs:
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: python fetch_sec_data.py
+
+      - name: Probe 13F
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: python probe_13f.py
