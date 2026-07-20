@@ -1,0 +1,27 @@
+name: Fetch Options Volume
+
+on:
+  schedule:
+    # 9pm UTC = 5pm ET (just after market close), Monday-Friday only
+    - cron: '0 21 * * 1-5'
+  workflow_dispatch:   # allows manual trigger from the Actions tab too
+
+jobs:
+  fetch-options-volume:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run options volume fetch
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: python fetch_options_volume.py
