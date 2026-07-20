@@ -436,6 +436,45 @@ app.get('/api/ticker/:ticker', async (req, res) => {
     const signalsById = {};
     const scores = [];
     const plainParts = [];
+    // Signal 0: Insider buying (Form 4)
+    try {
+      const insider = await getInsiderBuyingSignal(ticker);
+
+      if (insider.hasSignal && insider.confidenceScore > 0) {
+        scores.push(insider.confidenceScore);
+        plainParts.push(insider.explanation);
+      }
+
+      const d = insider.detail || {};
+
+      signalsById.insider_buying = {
+        status: insider.confidenceScore >= 70 ? 'positive'
+              : insider.confidenceScore >= 50 ? 'neutral'
+              : 'negative',
+        headline: insider.hasSignal
+          ? `${d.buyCount} insider buy(s) from ${d.distinctBuyers} insider(s)`
+          : insider.label,
+        detail: insider.explanation,
+        validation: {
+          timing: d.timingScore != null
+            ? `Timing sub-score ${d.timingScore}. Form 4s are filed within 2 business days of the transaction.`
+            : 'No buy activity to time.',
+          scaleVsSalary: insider.hasSignal
+            ? `Average scale-vs-salary sub-score ${Math.round(d.avgScale ?? 0)}/100 across ${d.buyCount} buy(s).`
+            : 'No buy activity to compare against compensation.',
+          trackRecord: 'No data available — requires accumulated history of past buys vs. subsequent price moves.',
+          corroboration: d.distinctBuyers > 1
+            ? `${d.distinctBuyers} distinct insiders bought — corroborated.`
+            : d.distinctBuyers === 1
+            ? 'Only one insider bought — no corroboration from others yet.'
+            : `${d.sellCount ?? 0} routine sell(s) on file — not counted as corroboration.`
+        }
+      };
+    } catch (err) {
+      console.error(`Insider signal failed for ${ticker}:`, err);
+    }
+
+</parameter>
 
     // Signal 1: Institutional buying
     try {
@@ -458,8 +497,8 @@ app.get('/api/ticker/:ticker', async (req, res) => {
           timing: `Timing sub-score ${d.timingScore ?? 'n/a'}. 13F filings lag up to 45 days.`,
           scaleVsSalary: 'Not applicable to institutional filings.',
           trackRecord: `Track record sub-score ${d.trackRecordScore ?? 'n/a'}.`,
-          corroboration: d.distinctFunds > 1
-            ? `${d.distinctFunds} funds hold a position.`
+          corroboration: d.holderCount > 1
+            ? `${d.holderCount} funds hold a position.`
             : 'Single holder — no corroboration.'
         }
       };
