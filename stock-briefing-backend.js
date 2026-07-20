@@ -7,6 +7,42 @@ const fs = require('fs');
 const path = require('path');
 const { getInstitutionalBuyingSignal } = require('./convictionScore.js');
 
+// Scores analyst consensus 0-100 from Finnhub recommendation trends.
+function getAnalystSignal(recommendations) {
+  if (!recommendations) return null;
+
+  const sb = recommendations.strongBuy || 0;
+  const b  = recommendations.buy || 0;
+  const h  = recommendations.hold || 0;
+  const s  = recommendations.sell || 0;
+  const ss = recommendations.strongSell || 0;
+  const total = sb + b + h + s + ss;
+
+  if (total === 0) return null;
+
+  // Weighted bullishness: strongBuy=1.0 down to strongSell=0
+  const score = Math.round(
+    ((sb * 1.0 + b * 0.75 + h * 0.5 + s * 0.25 + ss * 0) / total) * 100
+  );
+
+  const bullish = sb + b;
+  const bullishPct = Math.round((bullish / total) * 100);
+
+  return {
+    score,
+    status: score >= 70 ? 'positive' : score >= 50 ? 'neutral' : 'negative',
+    headline: `${bullishPct}% bullish across ${total} analysts`,
+    detail: `Strong Buy ${sb} · Buy ${b} · Hold ${h} · Sell ${s} · Strong Sell ${ss}`,
+    validation: {
+      timing: `Consensus as of ${recommendations.period || 'latest period'}. Ratings lag price moves.`,
+      scaleVsSalary: 'Not applicable to analyst ratings.',
+      trackRecord: 'No data available — requires logging past rating changes vs outcomes.',
+      corroboration: total >= 10
+        ? `${total} analysts covering — broad coverage.`
+        : `Only ${total} analyst(s) covering — thin coverage.`
+    }
+  };
+}
 const app = express();
 app.use(express.json());
 app.use(cors());
