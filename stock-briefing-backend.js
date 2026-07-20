@@ -448,7 +448,8 @@ app.get('/api/ticker/:ticker', async (req, res) => {
       const d = insider.detail || {};
 
       signalsById.insider_buying = {
-        status: insider.confidenceScore >= 70 ? 'positive'
+        status: !insider.hasSignal ? 'neutral'
+              : insider.confidenceScore >= 70 ? 'positive'
               : insider.confidenceScore >= 50 ? 'neutral'
               : 'negative',
         headline: insider.hasSignal
