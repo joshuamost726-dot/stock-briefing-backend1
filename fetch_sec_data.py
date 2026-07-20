@@ -12,21 +12,7 @@ from edgar import Company, set_identity
 SEC_IDENTITY = "joshuamost726@gmail.com"
 set_identity(SEC_IDENTITY)
 
-def get_tracked_tickers():
-    """Fetch tickers from database instead of hardcoded list"""
-    try:
-        conn = psycopg2.connect(os.environ['DATABASE_URL'])
-        cur = conn.cursor()
-        cur.execute('SELECT ticker FROM tracked_companies')
-        tickers = [row[0] for row in cur.fetchall()]
-        cur.close()
-        conn.close()
-        return tickers
-    except Exception as e:
-        print(f"Error fetching tickers from DB: {e}. Using fallback.")
-        return ['RILY', 'SKHY', 'ASTS', 'LRCX', 'QCOM', 'CWBHF']
-
-TRACKED_TICKERS = get_tracked_tickers()
+DATABASE_URL = os.environ["DATABASE_URL"]
 
 SMART_MONEY_WATCHLIST = [
     {"name": "Berkshire Hathaway", "cik": "1067983"},
@@ -36,7 +22,24 @@ SMART_MONEY_WATCHLIST = [
     {"name": "Tiger Global Management", "cik": None},
 ]
 
-DATABASE_URL = os.environ["DATABASE_URL"]
+
+def get_db_connection():
+    return psycopg2.connect(DATABASE_URL)
+
+
+def get_tracked_tickers():
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute('SELECT ticker FROM tracked_companies')
+        tickers = [row[0] for row in cur.fetchall()]
+        cur.close()
+        conn.close()
+        if tickers:
+            return tickers
+    except Exception as e:
+        print(f"Error fetching tickers from DB: {e}. Using fallback.")
+    return ['RILY', 'SKHY', 'ASTS', 'LRCX', 'QCOM', 'CWBHF']
 
 
 def resolve_cik_by_name(fund_name):
@@ -51,10 +54,6 @@ def resolve_cik_by_name(fund_name):
     return match.group(1) if match else None
 
 
-def get_db_connection():
-    return psycopg2.connect(DATABASE_URL)
-
-
 def get_col(row, *names):
     for name in names:
         if name in row and row[name] is not None:
@@ -63,7 +62,6 @@ def get_col(row, *names):
 
 
 def to_number(val):
-    """Convert a value that might be a string like '1,234' into a real number."""
     if val is None:
         return None
     if isinstance(val, (int, float)):
@@ -79,7 +77,7 @@ def fetch_executive_compensation(ticker, conn):
         company = Company(ticker)
         filings = company.get_filings(form="DEF 14A")
         if not filings:
-            print(f"  no DEF 14A found for {ticker}")
+            print(f"  {ticker}: no DEF 14A found")
             return
 
         proxy = filings.latest().obj()
@@ -87,23 +85,26 @@ def fetch_executive_compensation(ticker, conn):
 
         if proxy is None or not hasattr(proxy, "executive_compensation"):
             got_type = type(proxy).__name__ if proxy is not None else "None"
-            print(f"  {ticker}: DEF 14A didn't parse as a proxy statement (got {got_type}) — skipping (known edgartools limitation)")
+            print(f"  {ticker}: DEF 14A didn't parse as proxy (got {got_type}) - skipping")
             return
 
         comp_df = proxy.executive_compensation
         if comp_df is None or len(comp_df) == 0:
-            print(f"  {ticker}: proxy parsed but no compensation table found")
+            print(f"  {ticker}: proxy parsed but no compensation table")
             return
 
         rows = []
         for _, row in comp_df.iterrows():
             rows.append((
                 cik, ticker,
-                get_col(row, "name", "Name"), get_col(row, "position", "Position", "title", "Title"),
+                get_col(row, "name", "Name"),
+                get_col(row, "position", "Position", "title", "Title"),
                 get_col(row, "year", "Year", "fiscal_year"),
                 get_col(row, "total", "Total", "total_comp"),
-                get_col(row, "salary", "Salary"), get_col(row, "bonus", "Bonus"),
-                get_col(row, "stock_awards", "Stock Awards"), get_col(row, "option_awards", "Option Awards"),
+                get_col(row, "salary", "Salary"),
+                get_col(row, "bonus", "Bonus"),
+                get_col(row, "stock_awards", "Stock Awards"),
+                get_col(row, "option_awards", "Option Awards"),
             ))
 
         if rows:
@@ -117,10 +118,11 @@ def fetch_executive_compensation(ticker, conn):
                     DO UPDATE SET total_comp = EXCLUDED.total_comp, fetched_at = NOW()
                 """, rows)
             conn.commit()
+
         print(f"  {ticker}: wrote {len(rows)} exec comp rows")
 
     except Exception as e:
-        print(f"  ERROR fetching exec comp for {ticker}: {e}")
+        print(f"  ERROR exec comp for {ticker}: {e}")
         conn.rollback()
 
 
@@ -129,7 +131,7 @@ def fetch_institutional_holdings(fund_name, cik, tracked_tickers, conn):
         fund = Company(cik)
         filings = fund.get_filings(form="13F-HR")
         if len(filings) == 0:
-            print(f"  no 13F-HR found for {fund_name}")
+            print(f"  {fund_name}: no 13F-HR found")
             return
 
         sorted_filings = sorted(filings, key=lambda f: f.filing_date, reverse=True)
@@ -138,7 +140,7 @@ def fetch_institutional_holdings(fund_name, cik, tracked_tickers, conn):
 
         latest = latest_filing.obj()
         if latest is None or not getattr(latest, "has_infotable", False):
-            print(f"  {fund_name}: latest 13F-HR has no infotable data — skipping")
+            print(f"  {fund_name}: latest 13F-HR has no infotable - skipping")
             return
 
         holdings_df = latest.infotable
@@ -167,14 +169,16 @@ def fetch_institutional_holdings(fund_name, cik, tracked_tickers, conn):
                 if not match.empty:
                     prior_shares = to_number(get_col(match.iloc[0], "SharesPrnAmount", "Shares"))
 
-            pct_change = ((shares - prior_shares) / prior_shares * 100) if (shares is not None and prior_shares) else None
+            pct_change = None
+            if shares is not None and prior_shares:
+                pct_change = (shares - prior_shares) / prior_shares * 100
 
             rows.append((
                 cik, fund_name, ticker, shares, value,
                 report_period, prior_shares, pct_change,
             ))
 
-if rows:
+        if rows:
             with conn.cursor() as cur:
                 cur.execute(
                     "DELETE FROM institutional_holdings WHERE fund_cik = %s AND filing_period = %s",
@@ -191,13 +195,14 @@ if rows:
         print(f"  {fund_name}: wrote {len(rows)} holdings rows")
 
     except Exception as e:
-        print(f"  ERROR fetching holdings for {fund_name}: {e}")
+        print(f"  ERROR holdings for {fund_name}: {e}")
         conn.rollback()
 
 
 def main():
+    tracked = get_tracked_tickers()
     print("=" * 50)
-    print(f"Tracked tickers: {TRACKED_TICKERS}")
+    print(f"Tracked tickers: {tracked}")
     print("=" * 50)
 
     conn = get_db_connection()
@@ -211,14 +216,14 @@ def main():
             print(f"  resolving CIK for {name}...")
             cik = resolve_cik_by_name(name)
             if not cik:
-                print(f"  could not resolve CIK for {name} — skipping")
+                print(f"  could not resolve CIK for {name} - skipping")
                 continue
             print(f"  resolved {name} -> CIK {cik}")
 
-        fetch_institutional_holdings(name, cik, TRACKED_TICKERS, conn)
+        fetch_institutional_holdings(name, cik, tracked, conn)
 
     print("\nFetching executive compensation (DEF 14A)...")
-    for ticker in TRACKED_TICKERS:
+    for ticker in tracked:
         fetch_executive_compensation(ticker, conn)
 
     conn.close()
