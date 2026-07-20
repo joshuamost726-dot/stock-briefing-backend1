@@ -174,12 +174,56 @@ def fetch_institutional_holdings(fund_name, cik, tracked_tickers, conn):
                 report_period, prior_shares, pct_change,
             ))
 
-        if rows:
+if rows:
             with conn.cursor() as cur:
+                cur.execute(
+                    "DELETE FROM institutional_holdings WHERE fund_cik = %s AND filing_period = %s",
+                    (cik, report_period),
+                )
                 execute_values(cur, """
-                print("\n" + "="*50)
-print("Fetching executive compensation...")
-print("="*50)
+                    INSERT INTO institutional_holdings
+                        (fund_cik, fund_name, ticker, shares_held, value_usd,
+                         filing_period, prior_shares_held, pct_change)
+                    VALUES %s
+                """, rows)
+            conn.commit()
 
-from parse_def14a import fetch_and_store_exec_comp
-fetch_and_store_exec_comp()
+        print(f"  {fund_name}: wrote {len(rows)} holdings rows")
+
+    except Exception as e:
+        print(f"  ERROR fetching holdings for {fund_name}: {e}")
+        conn.rollback()
+
+
+def main():
+    print("=" * 50)
+    print(f"Tracked tickers: {TRACKED_TICKERS}")
+    print("=" * 50)
+
+    conn = get_db_connection()
+
+    print("\nFetching institutional holdings (13F-HR)...")
+    for fund in SMART_MONEY_WATCHLIST:
+        name = fund["name"]
+        cik = fund["cik"]
+
+        if not cik:
+            print(f"  resolving CIK for {name}...")
+            cik = resolve_cik_by_name(name)
+            if not cik:
+                print(f"  could not resolve CIK for {name} — skipping")
+                continue
+            print(f"  resolved {name} -> CIK {cik}")
+
+        fetch_institutional_holdings(name, cik, TRACKED_TICKERS, conn)
+
+    print("\nFetching executive compensation (DEF 14A)...")
+    for ticker in TRACKED_TICKERS:
+        fetch_executive_compensation(ticker, conn)
+
+    conn.close()
+    print("\nDone.")
+
+
+if __name__ == "__main__":
+    main()
