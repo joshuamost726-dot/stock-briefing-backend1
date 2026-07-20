@@ -1,0 +1,30 @@
+name: Fetch Short Interest
+
+on:
+  schedule:
+    # FINRA settlement dates are ~15th and last day of month, with data
+    # disseminated a few business days later. These two dates give a
+    # comfortable buffer after each publication.
+    - cron: '0 14 5 * *'    # 5th of each month, 2pm UTC
+    - cron: '0 14 20 * *'   # 20th of each month, 2pm UTC
+  workflow_dispatch:         # allows manual trigger from the Actions tab too
+
+jobs:
+  fetch-short-interest:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run short interest fetch
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: python fetch_short_interest.py
