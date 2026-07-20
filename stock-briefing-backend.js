@@ -20,9 +20,13 @@ function loadData() {
     return JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
   }
   return {
-    stocks: [
+   stocks: [
       { ticker: 'RILY', name: 'B. Riley Financial' },
-      { ticker: 'SKHY', name: 'Skyline Champion' }
+      { ticker: 'SKHY', name: 'SK Hynix' },
+      { ticker: 'ASTS', name: 'AST SpaceMobile' },
+      { ticker: 'LRCX', name: 'Lam Research' },
+      { ticker: 'QCOM', name: 'Qualcomm' },
+      { ticker: 'CWBHF', name: 'Charlottes Web' }
     ],
     email: 'joshuamost726@gmail.com',
     briefings: []
@@ -317,7 +321,20 @@ app.get('/api/briefing/latest', async (req, res) => {
     const stocksData = await Promise.all(
       data.stocks.map(stock => getStockData(stock.ticker))
     );
-    
+
+    // Attach conviction score to each stock
+    for (const stock of stocksData) {
+      try {
+        const signal = await getInstitutionalBuyingSignal(stock.ticker);
+        stock.convictionScore = signal?.score ?? signal?.convictionScore ?? 0;
+        stock.explanation = signal?.explanation ?? 'No signal data available';
+      } catch (err) {
+        console.error(`Conviction score failed for ${stock.ticker}:`, err.message);
+        stock.convictionScore = 0;
+        stock.explanation = 'Score unavailable';
+      }
+    }
+
     let briefing = '📈 STOCK BRIEFING REPORT\n';
     briefing += `Generated: ${new Date().toLocaleString()}\n`;
     briefing += `=====================================\n\n`;
@@ -334,6 +351,7 @@ app.get('/api/briefing/latest', async (req, res) => {
     res.status(500).json({ error: error.message });
   }
 });
+   
 
 app.post('/api/settings', (req, res) => {
   data.email = req.body.email || data.email;
