@@ -486,6 +486,8 @@ app.get('/api/ticker/:ticker', async (req, res) => {
     res.json({
       ticker,
       companyName: tracked.name || ticker,
+      quote: stockData.quote,
+      profile: stockData.profile,
       convictionScore: score,
       tier,
       action,
