@@ -474,8 +474,6 @@ app.get('/api/ticker/:ticker', async (req, res) => {
       console.error(`Insider signal failed for ${ticker}:`, err);
     }
 
-</parameter>
-
     // Signal 1: Institutional buying
     try {
       const signal = await getInstitutionalBuyingSignal(ticker);
