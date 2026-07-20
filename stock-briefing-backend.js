@@ -326,7 +326,8 @@ app.get('/api/briefing/latest', async (req, res) => {
     for (const stock of stocksData) {
       try {
         const signal = await getInstitutionalBuyingSignal(stock.ticker);
-        stock.convictionScore = signal?.score ?? signal?.convictionScore ?? 0;
+        stock.convictionScore = signal?.confidenceScore ?? 0;
+stock.tierLabel = signal?.label ?? 'No Data';
         stock.explanation = signal?.explanation ?? 'No signal data available';
       } catch (err) {
         console.error(`Conviction score failed for ${stock.ticker}:`, err.message);
