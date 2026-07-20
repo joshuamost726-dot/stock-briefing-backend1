@@ -178,15 +178,25 @@ def main():
     prior = load_prior_shares(conn, period)
     print(f"Prior-quarter rows available: {len(prior)}")
 
-    final = []
+   agg = {}
     for fund_cik, fund_name, ticker, shares, value in rows:
+        key = (fund_cik, ticker)
+        if key not in agg:
+            agg[key] = {"name": fund_name, "shares": 0.0, "value": 0.0}
+        agg[key]["shares"] += shares or 0
+        agg[key]["value"] += value or 0
+
+    print(f"Aggregated {len(rows)} lines into {len(agg)} fund-ticker positions")
+
+    final = []
+    for (fund_cik, ticker), d in agg.items():
         prior_shares = prior.get((fund_cik, ticker))
         pct_change = None
-        if shares is not None and prior_shares:
-            pct_change = (shares - float(prior_shares)) / float(prior_shares) * 100
+        if d["shares"] and prior_shares:
+            pct_change = (d["shares"] - float(prior_shares)) / float(prior_shares) * 100
 
         final.append((
-            fund_cik, fund_name, ticker, shares, value,
+            fund_cik, d["name"], ticker, d["shares"], d["value"],
             period, prior_shares, pct_change,
         ))
 
