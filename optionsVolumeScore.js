@@ -110,6 +110,7 @@ async function getOptionsVolumeSignal(ticker) {
       volumeScore,
       skewScore,
       daysOfHistory: history.length,
+      lastChecked: today.snapshot_date,
     },
   };
 }
