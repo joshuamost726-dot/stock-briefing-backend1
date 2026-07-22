@@ -9,15 +9,24 @@
  * conviction. Sells are stored and surfaced as context but are never
  * scored. If no buy exists, this function returns confidenceScore 0 and
  * says so plainly rather than inventing a number from sell-only data.
+ *
+ * POSITION CONTEXT: Form 4 filings report an exact transactionPricePerShare
+ * per trade — one of only two signals in this app with a real price point
+ * (institutional 13F filings are the other, via an implied average).
+ * When the caller passes the user's own cost basis, this computes a
+ * value-weighted average insider buy price and how it compares — genuinely
+ * useful context ("insiders just paid more/less than you did"), not
+ * available anywhere else in the tool.
  */
 
 const { Pool } = require('pg');
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+const { buildPositionContext } = require('./signalPriceContext.js');
 
 const BUY_CODE = 'P';
 const SELL_CODE = 'S';
 
-async function getInsiderBuyingSignal(ticker) {
+async function getInsiderBuyingSignal(ticker, position = null) {
   const { rows: transactions } = await pool.query(
     `SELECT insider_name, position, transaction_date, transaction_type,
             shares, price_per_share, value_usd, filed_at
@@ -88,6 +97,16 @@ async function getInsiderBuyingSignal(ticker) {
   const distinctBuyers = new Set(buys.map(b => b.insider_name)).size;
   const totalBuyValue = buys.reduce((sum, b) => sum + (Number(b.value_usd) || 0), 0);
 
+  // Value-weighted average price across buys that reported one (a handful
+  // of Form 4 lines omit price for non-cash transactions).
+  const pricedBuys = buys.filter(b => b.price_per_share != null && Number(b.price_per_share) > 0);
+  const avgBuyPrice = pricedBuys.length > 0
+    ? pricedBuys.reduce((sum, b) => sum + Number(b.price_per_share) * (Number(b.value_usd) || 0), 0) /
+      pricedBuys.reduce((sum, b) => sum + (Number(b.value_usd) || 0), 0)
+    : null;
+
+  const positionContext = buildPositionContext(avgBuyPrice, position);
+
   let label;
   if (confidenceScore >= 80) label = 'High Conviction';
   else if (confidenceScore >= 50) label = 'Moderate Conviction';
@@ -107,6 +126,14 @@ async function getInsiderBuyingSignal(ticker) {
     explanation += ` (${sells.length} routine sell(s) also on file — not scored.)`;
   }
 
+  if (avgBuyPrice != null) {
+    explanation += ` Average buy price: $${avgBuyPrice.toFixed(2)}.`;
+  }
+  if (positionContext) {
+    explanation += ` Your cost basis is $${positionContext.userCostBasis.toFixed(2)} — insiders bought ` +
+      `${positionContext.direction === 'similar' ? 'at a similar price' : `${Math.abs(positionContext.pctDifference).toFixed(0)}% ${positionContext.direction} your cost basis`}.`;
+  }
+
   return {
     ticker,
     confidenceScore,
@@ -118,6 +145,8 @@ async function getInsiderBuyingSignal(ticker) {
       sellCount: sells.length,
       distinctBuyers,
       totalBuyValue,
+      avgBuyPrice,
+      positionContext,
       avgScale,
       timingScore,
       corroborationScore,

@@ -68,7 +68,7 @@ function getAnalystSignal(recommendations) {
 // (scores/plainParts/activeStatuses) both /api/ticker/:ticker and
 // /api/briefing/latest need. Shared so the two endpoints can't drift out of
 // sync on which signals actually get checked.
-async function computeAllSignals(ticker, stockData) {
+async function computeAllSignals(ticker, stockData, position = null) {
   const signalsById = {};
   const scores = [];
   const plainParts = [];
@@ -86,7 +86,7 @@ async function computeAllSignals(ticker, stockData) {
   // Signal 0: Insider buying (Form 4)
   signalPromises.push((async () => {
   try {
-    const insider = await getInsiderBuyingSignal(ticker);
+    const insider = await getInsiderBuyingSignal(ticker, position);
 
     if (insider.hasSignal && insider.confidenceScore > 0) {
       scores.push(insider.confidenceScore);
@@ -106,6 +106,7 @@ async function computeAllSignals(ticker, stockData) {
         ? `${d.buyCount} insider buy(s) from ${d.distinctBuyers} insider(s)`
         : insider.label,
       detail: insider.explanation,
+      positionContext: d.positionContext || null,
       validation: {
         timing: d.timingScore != null
           ? `Timing sub-score ${d.timingScore}. Form 4s are filed within 2 business days of the transaction.`
@@ -134,7 +135,7 @@ async function computeAllSignals(ticker, stockData) {
   // Signal 1: Institutional buying
   signalPromises.push((async () => {
   try {
-    const signal = await getInstitutionalBuyingSignal(ticker);
+    const signal = await getInstitutionalBuyingSignal(ticker, position);
     const instScore = signal?.confidenceScore ?? 0;
     const d = signal?.detail || {};
 
@@ -150,6 +151,7 @@ async function computeAllSignals(ticker, stockData) {
         ? `${d.holderCount.toLocaleString()} institutional holder(s) on file`
         : 'No institutional holdings on file',
       detail: signal?.explanation || '',
+      positionContext: d.positionContext || null,
       validation: {
         timing: `Timing sub-score ${d.timingScore ?? 'n/a'}. 13F filings lag up to 45 days.`,
         scaleVsSalary: 'Not applicable to institutional filings.',
@@ -467,6 +469,7 @@ async function explainSignalsPlainly(signalsById) {
         s.simpleExplanation = await explainSignalPlainly({
           headline: s.headline,
           detail: s.detail,
+          positionContext: s.positionContext || null,
         });
       })
   );
@@ -499,6 +502,7 @@ function normalize(meta, raw) {
     headline: (raw && raw.headline) || 'No signal detected',
     detail: (raw && raw.detail) || '',
     simpleExplanation: (raw && raw.simpleExplanation) || (raw && raw.headline) || 'No signal detected',
+    positionContext: (raw && raw.positionContext) || null,
     validation: {
       timing:        v.timing        || 'No data available',
       scaleVsSalary: v.scaleVsSalary || 'No data available',
@@ -938,7 +942,7 @@ app.get('/api/ticker/:ticker', async (req, res) => {
     ]);
     const priceTarget = priceTargetResult;
 
-    const { signalsById, scores, plainParts, activeStatuses } = await computeAllSignals(ticker, stockData);
+    const { signalsById, scores, plainParts, activeStatuses } = await computeAllSignals(ticker, stockData, tracked.position || null);
 
     const score = scores.length
       ? Math.round(scores.reduce((a, b) => a + b, 0) / scores.length)
@@ -985,6 +989,12 @@ app.get('/api/ticker/:ticker', async (req, res) => {
         tier,
         plainParts,
         priceTarget,
+        position: tracked.position || null,
+        positionAdvice,
+        signalPriceContexts: [
+          signalsById.insider_buying?.positionContext && { signal: 'insider_buying', ...signalsById.insider_buying.positionContext },
+          signalsById.institutional_buying?.positionContext && { signal: 'institutional_buying', ...signalsById.institutional_buying.positionContext },
+        ].filter(Boolean),
       }),
       explainSignalsPlainly(signalsById),
     ]);

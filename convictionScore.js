@@ -9,10 +9,19 @@
  * MAX_SCORE_WITHOUT_MOMENTUM and never returns a high-conviction label.
  * That is deliberate: the tool should say "I cannot tell yet" rather
  * than dress up an ownership snapshot as a buy signal.
+ *
+ * POSITION CONTEXT: 13F filings don't report a transaction price — only
+ * total dollar value and share count at quarter-end. Dividing the two
+ * gives an IMPLIED average price across all reporting holders, which is
+ * a real approximation (blends old and new positions, and is stale by up
+ * to 45 days), not an actual trade price the way Form 4 is. Always
+ * labeled `approximate: true` downstream so it's never presented with
+ * false precision.
  */
 
 const { Pool } = require('pg');
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+const { buildPositionContext } = require('./signalPriceContext.js');
 
 const TOP_TIER_FUNDS = [
   'BERKSHIRE HATHAWAY',
@@ -44,7 +53,7 @@ function labelFor(score, momentumAvailable) {
   return { multiplier: 0.4, label: 'Likely Noise' };
 }
 
-async function getInstitutionalBuyingSignal(ticker) {
+async function getInstitutionalBuyingSignal(ticker, position = null) {
   const { rows } = await pool.query(
     `SELECT fund_name, shares_held, value_usd, pct_change, filing_period
        FROM institutional_holdings
@@ -82,6 +91,13 @@ async function getInstitutionalBuyingSignal(ticker) {
   const totalValue = values.reduce((a, b) => a + b, 0);
   const top10Value = values.slice(0, 10).reduce((a, b) => a + b, 0);
   const top10Pct = totalValue > 0 ? (top10Value / totalValue) * 100 : null;
+
+  // Implied average price across all reporting holders — see the
+  // POSITION CONTEXT note at the top of this file for why this is an
+  // approximation, not a real transaction price.
+  const totalShares = rows.reduce((sum, r) => sum + (Number(r.shares_held) || 0), 0);
+  const impliedAvgPrice = totalShares > 0 ? totalValue / totalShares : null;
+  const positionContext = buildPositionContext(impliedAvgPrice, position, { approximate: true });
 
   let concentrationScore = 50;
   let concentrationMeaningful = holderCount >= MIN_HOLDERS_FOR_CONCENTRATION;
@@ -162,6 +178,14 @@ async function getInstitutionalBuyingSignal(ticker) {
     explanation += ` This is an ownership snapshot, not a buying signal — quarter-over-quarter change requires a second sweep.`;
   }
 
+  if (impliedAvgPrice != null) {
+    explanation += ` Implied average price across holders (value ÷ shares, an approximation, not a reported trade price): $${impliedAvgPrice.toFixed(2)}.`;
+  }
+  if (positionContext) {
+    explanation += ` Your cost basis is $${positionContext.userCostBasis.toFixed(2)} — that's ` +
+      `${positionContext.direction === 'similar' ? 'a similar price to' : `${Math.abs(positionContext.pctDifference).toFixed(0)}% ${positionContext.direction} the`} implied institutional average.`;
+  }
+
   return {
     ticker,
     confidenceScore,
@@ -173,6 +197,8 @@ async function getInstitutionalBuyingSignal(ticker) {
       holderCount,
       top10Pct,
       totalValue,
+      impliedAvgPrice,
+      positionContext,
       breadthScore,
       concentrationScore,
       concentrationMeaningful,
