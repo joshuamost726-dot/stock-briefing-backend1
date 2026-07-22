@@ -12,6 +12,7 @@ const { getOptionsVolumeSignal } = require('./optionsVolumeScore.js');
 const { getCongressTradingSignal } = require('./congressTradingScore.js');
 const { getPriceTarget } = require('./priceTargetData.js');
 const { getVerdict } = require('./noiseScore.js');
+const { explainSignalPlainly } = require('./signalExplainer.js');
 
 // Scores analyst consensus 0-100 from Finnhub recommendation trends.
 function getAnalystSignal(recommendations) {
@@ -79,6 +80,7 @@ async function computeAllSignals(ticker, stockData) {
     const d = insider.detail || {};
 
     signalsById.insider_buying = {
+      hasData: insider.hasSignal,
       status: !insider.hasSignal ? 'neutral'
             : insider.confidenceScore >= 70 ? 'positive'
             : insider.confidenceScore >= 50 ? 'neutral'
@@ -123,6 +125,7 @@ async function computeAllSignals(ticker, stockData) {
     }
 
     signalsById.institutional_buying = {
+      hasData: !!d.holderCount,
       status: instScore >= 70 ? 'positive' : instScore >= 50 ? 'neutral' : 'negative',
       headline: d.holderCount
         ? `${d.holderCount.toLocaleString()} institutional holder(s) on file`
@@ -165,6 +168,7 @@ async function computeAllSignals(ticker, stockData) {
     }
 
     signalsById.short_interest = {
+      hasData: shortInt.hasSignal,
       status: !shortInt.hasSignal ? 'neutral'
             : shortInt.direction === 'decreasing' ? 'positive'
             : shortInt.direction === 'increasing' ? 'negative'
@@ -204,6 +208,7 @@ async function computeAllSignals(ticker, stockData) {
     }
 
     signalsById.options_volume = {
+      hasData: optVol.hasSignal,
       status: !optVol.hasSignal ? 'neutral'
             : optVol.confidenceScore >= 70 ? 'positive'
             : optVol.confidenceScore >= 50 ? 'neutral'
@@ -243,6 +248,7 @@ async function computeAllSignals(ticker, stockData) {
     }
 
     signalsById.congress_trading = {
+      hasData: congress.hasSignal,
       status: !congress.hasSignal ? 'neutral'
             : congress.confidenceScore >= 70 ? 'positive'
             : congress.confidenceScore >= 50 ? 'neutral'
@@ -277,10 +283,25 @@ async function computeAllSignals(ticker, stockData) {
   const analyst = getAnalystSignal(stockData.recommendations);
   if (analyst) {
     scores.push(analyst.score);
-    signalsById.analyst_rating = analyst;
+    signalsById.analyst_rating = { ...analyst, hasData: true };
     plainParts.push(`Analyst consensus: ${analyst.headline}.`);
     activeStatuses.push(analyst.status);
   }
+
+  // Rewrite each data-bearing signal's headline into a short plain-English
+  // explanation via Claude, in parallel. Signals with no data keep their
+  // existing headline as-is — already about as simple as it gets, not worth
+  // a Claude call.
+  await Promise.all(
+    Object.values(signalsById)
+      .filter(s => s.hasData)
+      .map(async s => {
+        s.simpleExplanation = await explainSignalPlainly({
+          headline: s.headline,
+          detail: s.detail,
+        });
+      })
+  );
 
   return { signalsById, scores, plainParts, activeStatuses };
 }
@@ -305,6 +326,7 @@ function normalize(meta, raw) {
     status: (raw && raw.status) || 'neutral',
     headline: (raw && raw.headline) || 'No signal detected',
     detail: (raw && raw.detail) || '',
+    simpleExplanation: (raw && raw.simpleExplanation) || (raw && raw.headline) || 'No signal detected',
     validation: {
       timing:        v.timing        || 'No data available',
       scaleVsSalary: v.scaleVsSalary || 'No data available',
