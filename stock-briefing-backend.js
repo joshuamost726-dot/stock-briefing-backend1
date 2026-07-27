@@ -1,8 +1,6 @@
 const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
-const fs = require('fs');
-const path = require('path');
 const { Pool } = require('pg');
 
 // Used directly by this file for routes that read daily_prices (price
@@ -793,38 +791,60 @@ const app = express();
 app.use(express.json());
 app.use(cors());
 
-// Data file for storage — lives on a persistent Railway volume mounted at
-// /data in production so tracked stocks, positions, and email survive
-// redeploys (the app's own working directory is ephemeral and gets wiped on
-// every deploy, which is exactly why positions kept resetting before this).
-// Falls back to a local file next to the script when /data doesn't exist
-// (local development, where there's no mounted volume).
-const DATA_FILE = fs.existsSync('/data')
-  ? '/data/data.json'
-  : path.join(__dirname, 'data.json');
-
-// Load or initialize data
-function loadData() {
-  if (fs.existsSync(DATA_FILE)) {
-    return JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
+// Tracked stocks + cost-basis positions live in tracked_companies (Postgres)
+// rather than a local data.json file. That file used to sit on a persistent
+// Railway volume specifically because the app's own working directory is
+// ephemeral and gets wiped on every deploy — moving this into the database
+// we already run removes that dependency entirely, so hosting no longer
+// needs volume support.
+function rowToStock(row) {
+  const stock = { ticker: row.ticker, name: row.company_name || row.ticker };
+  if (row.cost_per_share != null && row.shares != null) {
+    stock.position = {
+      costPerShare: Number(row.cost_per_share),
+      shares: Number(row.shares),
+      updatedAt: row.position_updated_at ? new Date(row.position_updated_at).toISOString() : null,
+    };
   }
-  return {
-   stocks: [
-      { ticker: 'RILY', name: 'B. Riley Financial' },
-      { ticker: 'SKHY', name: 'SK Hynix' },
-      { ticker: 'ASTS', name: 'AST SpaceMobile' },
-      { ticker: 'LRCX', name: 'Lam Research' },
-      { ticker: 'QCOM', name: 'Qualcomm' },
-      { ticker: 'CWBHF', name: 'Charlottes Web' }
-    ]
-  };
+  return stock;
 }
 
-function saveData(data) {
-  fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2));
+async function getTrackedStocks() {
+  const { rows } = await dbPool.query(
+    'SELECT ticker, company_name, cost_per_share, shares, position_updated_at FROM tracked_companies ORDER BY ticker'
+  );
+  return rows.map(rowToStock);
 }
 
-let data = loadData();
+async function getTrackedStock(ticker) {
+  const { rows } = await dbPool.query(
+    'SELECT ticker, company_name, cost_per_share, shares, position_updated_at FROM tracked_companies WHERE ticker = $1',
+    [ticker]
+  );
+  return rows[0] ? rowToStock(rows[0]) : null;
+}
+
+async function setPosition(ticker, costPerShare, shares) {
+  const { rows } = await dbPool.query(
+    `UPDATE tracked_companies
+        SET cost_per_share = $1, shares = $2, position_updated_at = NOW()
+      WHERE ticker = $3
+      RETURNING ticker, company_name, cost_per_share, shares, position_updated_at`,
+    [costPerShare, shares, ticker]
+  );
+  return rows[0] ? rowToStock(rows[0]) : null;
+}
+
+async function clearPosition(ticker) {
+  const { rows } = await dbPool.query(
+    `UPDATE tracked_companies
+        SET cost_per_share = NULL, shares = NULL, position_updated_at = NULL
+      WHERE ticker = $1
+      RETURNING ticker, company_name, cost_per_share, shares, position_updated_at`,
+    [ticker]
+  );
+  return rows[0] ? rowToStock(rows[0]) : null;
+}
 
 // API Keys
 const FINNHUB_KEY = process.env.FINNHUB_API_KEY;
@@ -986,8 +1006,8 @@ async function getStockData(ticker) {
 }
 
 // API Routes
-app.get('/api/stocks', (req, res) => {
-  res.json(data.stocks);
+app.get('/api/stocks', async (req, res) => {
+  res.json(await getTrackedStocks());
 });
 
 app.post('/api/stocks', async (req, res) => {
@@ -995,51 +1015,34 @@ app.post('/api/stocks', async (req, res) => {
   if (!ticker) return res.status(400).json({ error: 'Ticker required' });
 
   const upperTicker = ticker.toUpperCase();
-  const exists = data.stocks.find(s => s.ticker === upperTicker);
+  const exists = await getTrackedStock(upperTicker);
   if (exists) return res.status(400).json({ error: 'Stock already tracked' });
 
   const { cik, secName } = await resolveCikForTicker(upperTicker);
   const stockName = name || secName || ticker;
 
-  data.stocks.push({ ticker: upperTicker, name: stockName });
-  saveData(data);
+  await dbPool.query(
+    `INSERT INTO tracked_companies (ticker, company_name, cik)
+     VALUES ($1, $2, $3)
+     ON CONFLICT (ticker) DO UPDATE SET company_name = EXCLUDED.company_name, cik = EXCLUDED.cik, updated_at = NOW()`,
+    [upperTicker, stockName, cik]
+  );
 
-  try {
-    await dbPool.query(
-      `INSERT INTO tracked_companies (ticker, company_name, cik)
-       VALUES ($1, $2, $3)
-       ON CONFLICT (ticker) DO UPDATE SET company_name = EXCLUDED.company_name, cik = EXCLUDED.cik, updated_at = NOW()`,
-      [upperTicker, stockName, cik]
-    );
-  } catch (err) {
-    // data.json is still the source of truth for the website itself — a
-    // failure here means the Python fetch scripts won't pick this ticker
-    // up automatically, but it shouldn't block adding the stock at all.
-    console.error(`Failed to add ${upperTicker} to tracked_companies:`, err);
-  }
-
-  res.json(data.stocks);
+  res.json(await getTrackedStocks());
 });
 
 app.delete('/api/stocks/:ticker', async (req, res) => {
   const upperTicker = req.params.ticker.toUpperCase();
-  data.stocks = data.stocks.filter(s => s.ticker !== upperTicker);
-  saveData(data);
-
-  try {
-    await dbPool.query('DELETE FROM tracked_companies WHERE ticker = $1', [upperTicker]);
-  } catch (err) {
-    console.error(`Failed to remove ${upperTicker} from tracked_companies:`, err);
-  }
-
-  res.json(data.stocks);
+  await dbPool.query('DELETE FROM tracked_companies WHERE ticker = $1', [upperTicker]);
+  res.json(await getTrackedStocks());
 });
 
-// Phase 6 — cost basis / position tracking, stored in data.json alongside
-// the tracked stock list (personal portfolio data, not market data).
-app.put('/api/stocks/:ticker/position', (req, res) => {
+// Phase 6 — cost basis / position tracking, stored in tracked_companies
+// alongside the tracked stock list (personal portfolio data, not market
+// data, but no reason to keep it in a separate store any more).
+app.put('/api/stocks/:ticker/position', async (req, res) => {
   const ticker = req.params.ticker.toUpperCase();
-  const stock = data.stocks.find(s => s.ticker === ticker);
+  const stock = await getTrackedStock(ticker);
   if (!stock) return res.status(404).json({ error: 'Ticker not tracked', ticker });
 
   const costPerShare = Number(req.body.costPerShare);
@@ -1052,19 +1055,15 @@ app.put('/api/stocks/:ticker/position', (req, res) => {
     return res.status(400).json({ error: 'shares must be a positive number' });
   }
 
-  stock.position = { costPerShare, shares, updatedAt: new Date().toISOString() };
-  saveData(data);
-  res.json(stock);
+  res.json(await setPosition(ticker, costPerShare, shares));
 });
 
-app.delete('/api/stocks/:ticker/position', (req, res) => {
+app.delete('/api/stocks/:ticker/position', async (req, res) => {
   const ticker = req.params.ticker.toUpperCase();
-  const stock = data.stocks.find(s => s.ticker === ticker);
+  const stock = await getTrackedStock(ticker);
   if (!stock) return res.status(404).json({ error: 'Ticker not tracked', ticker });
 
-  delete stock.position;
-  saveData(data);
-  res.json(stock);
+  res.json(await clearPosition(ticker));
 });
 
 // Per-stock summary feeding the Dashboard's ticker grid — name kept as
@@ -1072,8 +1071,9 @@ app.delete('/api/stocks/:ticker/position', (req, res) => {
 // anything to do with the (removed) email feature.
 app.get('/api/briefing/latest', async (req, res) => {
   try {
+    const trackedStocks = await getTrackedStocks();
     const stocksData = await Promise.all(
-      data.stocks.map(stock => getStockData(stock.ticker))
+      trackedStocks.map(stock => getStockData(stock.ticker))
     );
 
     // Each stock's signal computation is independent of every other stock's,
@@ -1097,7 +1097,7 @@ app.get('/api/briefing/latest', async (req, res) => {
    
 app.get('/api/ticker/:ticker', async (req, res) => {
   const ticker = String(req.params.ticker || '').toUpperCase();
-  const tracked = data.stocks.find(s => s.ticker === ticker);
+  const tracked = await getTrackedStock(ticker);
 
   if (!tracked) {
     return res.status(404).json({ error: 'Ticker not tracked', ticker });
@@ -1206,7 +1206,7 @@ app.get('/api/ticker/:ticker', async (req, res) => {
 // Korea Exchange listing, priced in KRW, not the thin US OTC line).
 app.get('/api/ticker/:ticker/history', async (req, res) => {
   const ticker = String(req.params.ticker || '').toUpperCase();
-  const tracked = data.stocks.find(s => s.ticker === ticker);
+  const tracked = await getTrackedStock(ticker);
 
   if (!tracked) {
     return res.status(404).json({ error: 'Ticker not tracked', ticker });
@@ -1242,7 +1242,8 @@ app.get('/api/ticker/:ticker/history', async (req, res) => {
 // dashboard chart.
 app.get('/api/portfolio', async (req, res) => {
   try {
-    const positioned = data.stocks.filter(s => s.position && s.position.shares && s.position.costPerShare);
+    const trackedStocks = await getTrackedStocks();
+    const positioned = trackedStocks.filter(s => s.position && s.position.shares && s.position.costPerShare);
 
     if (positioned.length === 0) {
       return res.json({
