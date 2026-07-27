@@ -22,12 +22,21 @@ function parseBulletArray(text, fallback) {
       if (items.length > 0) return items;
     }
   } catch (err) {
-    // not valid JSON — fall through to best-effort line splitting
+    // Not valid JSON — often means the response got cut off mid-array
+    // (max_tokens reached before the closing bracket). The text still
+    // looks like `["first sentence.", "second sen` in that case, so pull
+    // out whatever complete quoted strings exist rather than falling
+    // through to a raw line-split, which would render the literal `[`,
+    // quote marks, and trailing commas as if they were bullet text.
+    const quoted = [...cleaned.matchAll(/"((?:[^"\\]|\\.)*)"/g)]
+      .map(m => m[1].replace(/\\"/g, '"').replace(/\\n/g, ' ').trim())
+      .filter(Boolean);
+    if (quoted.length > 0) return quoted;
   }
 
   const lines = cleaned
     .split('\n')
-    .map(l => l.replace(/^[-*•]\s*/, '').trim())
+    .map(l => l.replace(/^[-*•]\s*/, '').replace(/^\[|\]$/g, '').replace(/^"|",?$/g, '').trim())
     .filter(Boolean);
 
   return lines.length > 0 ? lines : fallback;

@@ -49,7 +49,7 @@ async function explainSignalPlainly({ headline, detail, positionContext }) {
   try {
     const message = await anthropic.messages.create({
       model: 'claude-haiku-4-5',
-      max_tokens: hasPositionContext ? 320 : 120,
+      max_tokens: hasPositionContext ? 320 : 220,
       system:
         'You explain one financial data signal to a retail investor, using only the structured facts ' +
         'given. Do not add facts not present in the input. If a ticker symbol appears in the input, use ' +
