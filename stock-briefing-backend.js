@@ -52,6 +52,7 @@ const { explainNewsForTicker } = require('./newsExplainer.js');
 const { getUpcomingEvents } = require('./upcomingEvents.js');
 const { getAiTake } = require('./aiTakeScore.js');
 const { applyPositionAwareAdvice } = require('./positionAdvice.js');
+const { getEarningsSurpriseSignal } = require('./earningsSurpriseScore.js');
 
 // Scores analyst consensus 0-100 from Finnhub recommendation trends.
 function getAnalystSignal(recommendations) {
@@ -681,6 +682,15 @@ async function computeAllSignals(ticker, stockData, position = null) {
     activeStatuses.push(analyst.status);
   }
 
+  // Signal 3: Earnings surprise history
+  const earningsSurprise = getEarningsSurpriseSignal(stockData.earningsSurpriseHistory);
+  if (earningsSurprise) {
+    scores.push(earningsSurprise.score);
+    signalsById.earnings_surprise = { ...earningsSurprise, hasData: true };
+    plainParts.push(`Earnings surprise history: ${earningsSurprise.headline}.`);
+    activeStatuses.push(earningsSurprise.status);
+  }
+
   return { signalsById, scores, plainParts, activeStatuses };
 }
 
@@ -712,7 +722,7 @@ const SIGNAL_ORDER = [
   { id: 'korea_ownership',      label: 'Korea Ownership Change', source: 'Open DART (Korea FSS)', category: 'Company Filings' },
   { id: 'korea_major_shareholder', label: 'Korea Major Shareholder', source: 'Open DART (Korea FSS)', category: 'Company Filings' },
   { id: 'korea_capital_actions', label: 'Korea Capital Actions', source: 'Open DART (Korea FSS)', category: 'Company Filings' },
-  { id: 'earnings_whisper',     label: 'Earnings Whisper',      source: null,                    category: 'Analyst & Estimates' },
+  { id: 'earnings_surprise',    label: 'Earnings Surprise History', source: 'Finnhub',          category: 'Analyst & Estimates' },
   { id: 'analyst_rating',       label: 'Analyst Rating Change', source: 'Finnhub',               category: 'Analyst & Estimates' },
   { id: 'short_interest',       label: 'Short Interest',        source: 'FINRA (via Nasdaq)',    category: 'Market Activity' },
   { id: 'options_volume',       label: 'Options Call Volume',   source: 'Yahoo Finance',         category: 'Market Activity' },
@@ -922,6 +932,22 @@ async function getEarningsCalendar(ticker) {
   }
 }
 
+// Historical actual-vs-estimate EPS surprises — a different, real signal
+// from a "whisper number" (which has no viable free data source; same
+// dead-end as SEDAR+ for CWBHF), but a legitimate replacement for the
+// earnings_whisper slot that sat unbuilt since the project's early days.
+async function getEarningsSurpriseHistory(ticker) {
+  try {
+    const res = await axios.get(`https://finnhub.io/api/v1/stock/earnings`, {
+      params: { symbol: ticker, token: FINNHUB_KEY }
+    });
+    return Array.isArray(res.data) ? res.data : [];
+  } catch (e) {
+    console.error(`Error fetching earnings surprise history for ${ticker}:`, e.message);
+    return null;
+  }
+}
+
 // Searching by bare ticker (e.g. "QCOM") matches unrelated noise — NewsAPI's
 // qInTitle restricted to the company's actual name is much more precise,
 // since it requires the name to appear in the headline itself, not just
@@ -958,11 +984,12 @@ async function getStockData(ticker) {
     // (as this used to) means paying for 4 round trips back to back instead
     // of 1. news needs profile.name, so it starts right after that group
     // resolves rather than joining it.
-    const [quote, profile, recommendations, earnings] = await Promise.all([
+    const [quote, profile, recommendations, earnings, earningsSurpriseHistory] = await Promise.all([
       getStockQuote(ticker),
       getCompanyProfile(ticker),
       getRecommendationTrends(ticker),
       getEarningsCalendar(ticker),
+      getEarningsSurpriseHistory(ticker),
     ]);
     const news = await getNews(ticker, profile?.name);
 
@@ -991,6 +1018,7 @@ async function getStockData(ticker) {
       },
       recommendations: recommendations?.[0] || null,
       nextEarnings: earnings?.[0] || null,
+      earningsSurpriseHistory: earningsSurpriseHistory || [],
       news: news.slice(0, 5).map(n => ({
         title: n.title,
         description: n.description || null,
