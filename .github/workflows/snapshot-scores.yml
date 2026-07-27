@@ -1,0 +1,16 @@
+name: Snapshot Conviction Scores
+
+on:
+  schedule:
+    # 9:45pm UTC = 5:45pm ET, Monday-Friday — after the other daily fetch
+    # jobs (technical prices, short interest, etc.) have had time to land,
+    # so the snapshot reflects the day's freshest signal data.
+    - cron: '45 21 * * 1-5'
+  workflow_dispatch:
+
+jobs:
+  snapshot-scores:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger score snapshot on the live backend
+        run: curl -fsS -m 120 --retry 2 -X POST https://stock-briefing-backend1.onrender.com/api/internal/snapshot-scores

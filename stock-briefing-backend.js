@@ -55,6 +55,11 @@ const { applyPositionAwareAdvice } = require('./positionAdvice.js');
 const { getEarningsSurpriseSignal } = require('./earningsSurpriseScore.js');
 const { extractCompanyEvents } = require('./companyEventsScore.js');
 const { explainPriceMove } = require('./priceMoveExplainer.js');
+const {
+  getInsiderBuyingTrackRecord,
+  getCongressTradingTrackRecord,
+  getKoreaOwnershipTrackRecord,
+} = require('./signalTrackRecord.js');
 
 // Scores analyst consensus 0-100 from Finnhub recommendation trends.
 function getAnalystSignal(recommendations) {
@@ -97,6 +102,18 @@ function getAnalystSignal(recommendations) {
   };
 }
 
+// Turns a signalTrackRecord.js result (or null, when there isn't enough
+// computable history yet) into the plain-English string the Track Record
+// validation field shows — same fallback text as before when null, so
+// signals/tickers without enough data yet look exactly as they did.
+function formatTrackRecord(tr, eventNounPlural) {
+  if (!tr) {
+    return `No data available — requires accumulated history of past ${eventNounPlural} vs. subsequent price moves.`;
+  }
+  return `Looking back at ${tr.sampleSize} past ${eventNounPlural} with enough price history to check: ` +
+    `the stock was up ${tr.hitRate}% of the time ${tr.holdingDays} trading days later (avg ${tr.avgReturnPct >= 0 ? '+' : ''}${tr.avgReturnPct}%).`;
+}
+
 // Runs every signal for a ticker (insider buying, institutional buying, short
 // interest, options volume, congressional trading, analyst rating) and
 // returns the raw per-signal detail plus the aggregation inputs
@@ -121,7 +138,10 @@ async function computeAllSignals(ticker, stockData, position = null) {
   // Signal 0: Insider buying (Form 4)
   signalPromises.push((async () => {
   try {
-    const insider = await getInsiderBuyingSignal(ticker, position);
+    const [insider, insiderTrackRecord] = await Promise.all([
+      getInsiderBuyingSignal(ticker, position),
+      getInsiderBuyingTrackRecord(ticker),
+    ]);
 
     if (insider.hasSignal && insider.confidenceScore > 0) {
       scores.push({ id: 'insider_buying', score: insider.confidenceScore });
@@ -149,7 +169,7 @@ async function computeAllSignals(ticker, stockData, position = null) {
         scaleVsSalary: insider.hasSignal
           ? `Average scale-vs-salary sub-score ${Math.round(d.avgScale ?? 0)}/100 across ${d.buyCount} buy(s).`
           : 'No buy activity to compare against compensation.',
-        trackRecord: 'No data available — requires accumulated history of past buys vs. subsequent price moves.',
+        trackRecord: formatTrackRecord(insiderTrackRecord, 'Form 4 buys'),
         corroboration: d.distinctBuyers > 1
           ? `${d.distinctBuyers} distinct insiders bought — corroborated.`
           : d.distinctBuyers === 1
@@ -306,7 +326,10 @@ async function computeAllSignals(ticker, stockData, position = null) {
   // Signal: Congressional trading
   signalPromises.push((async () => {
   try {
-    const congress = await getCongressTradingSignal(ticker);
+    const [congress, congressTrackRecord] = await Promise.all([
+      getCongressTradingSignal(ticker),
+      getCongressTradingTrackRecord(ticker),
+    ]);
     const d = congress.detail || {};
 
     if (congress.hasSignal && congress.confidenceScore > 0) {
@@ -329,7 +352,7 @@ async function computeAllSignals(ticker, stockData, position = null) {
           ? `Timing sub-score ${d.timingScore}. STOCK Act disclosures can lag up to 45 days behind the trade.`
           : 'No purchase activity to time.',
         scaleVsSalary: 'Not applicable to congressional trading.',
-        trackRecord: 'No data available — requires accumulated history of past purchases vs. subsequent price moves.',
+        trackRecord: formatTrackRecord(congressTrackRecord, 'congressional purchases'),
         corroboration: d.distinctBuyers > 1
           ? `${d.distinctBuyers} distinct members of Congress bought — corroborated.`
           : d.distinctBuyers === 1
@@ -485,7 +508,10 @@ async function computeAllSignals(ticker, stockData, position = null) {
   // insider disclosure at all)
   signalPromises.push((async () => {
   try {
-    const korea = await getKoreaOwnershipSignal(ticker);
+    const [korea, koreaTrackRecord] = await Promise.all([
+      getKoreaOwnershipSignal(ticker),
+      getKoreaOwnershipTrackRecord(ticker),
+    ]);
     const d = korea.detail || {};
 
     if (korea.hasSignal && korea.confidenceScore > 0) {
@@ -508,7 +534,7 @@ async function computeAllSignals(ticker, stockData, position = null) {
           ? `Timing sub-score ${d.timingScore}.`
           : 'No increase activity to time.',
         scaleVsSalary: 'Not applicable — Korean disclosure reports no compensation data here.',
-        trackRecord: 'No data available — requires accumulated history of past increases vs. subsequent price moves.',
+        trackRecord: formatTrackRecord(koreaTrackRecord, 'ownership increases'),
         corroboration: d.distinctReporters > 1
           ? `${d.distinctReporters} distinct reporters increased holdings — corroborated.`
           : d.distinctReporters === 1
@@ -1186,6 +1212,26 @@ app.get('/api/briefing/latest', async (req, res) => {
       trackedStocks.map(stock => getStockData(stock.ticker))
     );
 
+    // Sparkline data for the Dashboard cards — one bulk query for every
+    // tracked ticker's last 30 trading days instead of N round trips.
+    // Shape only (a mini trend line), not an absolute-value comparison
+    // across tickers, so SKHY's KRW-denominated rows are fine here even
+    // though they're not directly comparable in dollar terms to the rest.
+    const sparklineByTicker = {};
+    try {
+      const { rows: sparkRows } = await dbPool.query(
+        `SELECT ticker, trade_date, close FROM daily_prices
+          WHERE ticker = ANY($1) AND trade_date >= NOW() - INTERVAL '30 days'
+          ORDER BY trade_date ASC`,
+        [trackedStocks.map(s => s.ticker)]
+      );
+      for (const row of sparkRows) {
+        (sparklineByTicker[row.ticker] ??= []).push(Number(row.close));
+      }
+    } catch (err) {
+      console.error('Sparkline data fetch failed:', err);
+    }
+
     // Each stock's signal computation is independent of every other stock's,
     // so run all of them concurrently instead of one at a time.
     await Promise.all(stocksData.map(async (stock) => {
@@ -1198,6 +1244,7 @@ app.get('/api/briefing/latest', async (req, res) => {
       stock.convictionScore = conviction.score;
       stock.scoreConfidence = conviction.confidence;
       stock.scoreCoveragePct = conviction.coveragePct;
+      stock.sparkline = sparklineByTicker[stock.ticker] || [];
     }));
 
     res.json({ stocks: stocksData });
@@ -1370,6 +1417,41 @@ app.get('/api/ticker/:ticker/history', async (req, res) => {
   }
 });
 
+// Daily conviction-score snapshots for the per-stock score-history chart —
+// see the POST /api/internal/snapshot-scores route (near app.listen) for how
+// this table gets filled in.
+app.get('/api/ticker/:ticker/score-history', async (req, res) => {
+  const ticker = String(req.params.ticker || '').toUpperCase();
+  const tracked = await getTrackedStock(ticker);
+
+  if (!tracked) {
+    return res.status(404).json({ error: 'Ticker not tracked', ticker });
+  }
+
+  try {
+    const { rows } = await dbPool.query(
+      `SELECT snapshot_date, score, confidence, coverage_pct
+         FROM score_history
+        WHERE ticker = $1
+        ORDER BY snapshot_date ASC`,
+      [ticker]
+    );
+
+    res.json({
+      ticker,
+      history: rows.map(r => ({
+        date: r.snapshot_date instanceof Date ? r.snapshot_date.toISOString().slice(0, 10) : String(r.snapshot_date).slice(0, 10),
+        score: r.score,
+        confidence: r.confidence,
+        coveragePct: r.coverage_pct,
+      })),
+    });
+  } catch (error) {
+    console.error(`[ticker/${ticker}/score-history]`, error);
+    res.status(500).json({ error: 'Failed to load score history' });
+  }
+});
+
 // Aggregates every tracked stock that has a position into one portfolio
 // summary: total value, today's $/% change (both from live quotes, accurate
 // for every ticker), and an approximated 1-year value trend for the
@@ -1481,6 +1563,47 @@ app.get('/api/portfolio', async (req, res) => {
   } catch (error) {
     console.error('[portfolio]', error);
     res.status(500).json({ error: 'Failed to build portfolio summary' });
+  }
+});
+
+// Computes and stores today's conviction score for every tracked stock, one
+// row per (ticker, day) — feeds the score-history chart on the ticker page.
+// Meant to be called once a day by a scheduled GitHub Actions workflow
+// (same pattern as the Python fetch scripts, just hitting this endpoint
+// instead of writing to Postgres directly, since the score computation
+// itself lives in this file, not a standalone script). Upserts on
+// (ticker, snapshot_date) so re-running it the same day is harmless. No
+// auth, matching every other route in this API — nothing here is
+// sensitive, worst case is an extra snapshot row.
+app.post('/api/internal/snapshot-scores', async (req, res) => {
+  try {
+    const trackedStocks = await getTrackedStocks();
+    const results = [];
+
+    for (const stock of trackedStocks) {
+      try {
+        const stockData = await getStockData(stock.ticker);
+        const { scores } = await computeAllSignals(stock.ticker, stockData);
+        const conviction = computeConviction(scores, stock.ticker);
+
+        await dbPool.query(
+          `INSERT INTO score_history (ticker, snapshot_date, score, confidence, coverage_pct)
+           VALUES ($1, CURRENT_DATE, $2, $3, $4)
+           ON CONFLICT (ticker, snapshot_date)
+           DO UPDATE SET score = EXCLUDED.score, confidence = EXCLUDED.confidence, coverage_pct = EXCLUDED.coverage_pct`,
+          [stock.ticker, conviction.score, conviction.confidence, conviction.coveragePct]
+        );
+        results.push({ ticker: stock.ticker, score: conviction.score, confidence: conviction.confidence });
+      } catch (err) {
+        console.error(`Score snapshot failed for ${stock.ticker}:`, err);
+        results.push({ ticker: stock.ticker, error: err.message });
+      }
+    }
+
+    res.json({ snapshotDate: new Date().toISOString().slice(0, 10), results });
+  } catch (error) {
+    console.error('[snapshot-scores]', error);
+    res.status(500).json({ error: 'Failed to snapshot scores' });
   }
 });
 
