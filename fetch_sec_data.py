@@ -14,7 +14,8 @@ set_identity(SEC_IDENTITY)
 
 DATABASE_URL = os.environ["DATABASE_URL"]
 
-SMART_MONEY_WATCHLIST = [
+# Used only if smart_money_watchlist can't be reached.
+FALLBACK_WATCHLIST = [
     {"name": "Berkshire Hathaway", "cik": "1067983"},
     {"name": "Renaissance Technologies", "cik": None},
     {"name": "Baupost Group", "cik": None},
@@ -40,6 +41,42 @@ def get_tracked_tickers():
     except Exception as e:
         print(f"Error fetching tickers from DB: {e}. Using fallback.")
     return ['RILY', 'SKHY', 'ASTS', 'LRCX', 'QCOM', 'CWBHF']
+
+
+def get_smart_money_watchlist():
+    """Reads the fund watchlist from smart_money_watchlist (same source-of-
+    truth pattern as tracked_companies for the ticker list) instead of a
+    hardcoded array, so a resolved CIK persists across runs instead of being
+    re-resolved by name every time."""
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute('SELECT fund_name, fund_cik FROM smart_money_watchlist ORDER BY fund_name')
+        rows = [{"name": row[0], "cik": row[1]} for row in cur.fetchall()]
+        cur.close()
+        conn.close()
+        if rows:
+            return rows
+    except Exception as e:
+        print(f"Error fetching smart_money_watchlist from DB: {e}. Using fallback.")
+    return FALLBACK_WATCHLIST
+
+
+def save_resolved_cik(conn, fund_name, cik):
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO smart_money_watchlist (fund_name, fund_cik)
+                VALUES (%s, %s)
+                ON CONFLICT (fund_name) DO UPDATE SET fund_cik = EXCLUDED.fund_cik
+                """,
+                (fund_name, cik),
+            )
+        conn.commit()
+    except Exception as e:
+        print(f"  Could not cache resolved CIK for {fund_name}: {e}")
+        conn.rollback()
 
 
 def resolve_cik_by_name(fund_name):
@@ -208,7 +245,7 @@ def main():
     conn = get_db_connection()
 
     print("\nFetching institutional holdings (13F-HR)...")
-    for fund in SMART_MONEY_WATCHLIST:
+    for fund in get_smart_money_watchlist():
         name = fund["name"]
         cik = fund["cik"]
 
@@ -219,6 +256,7 @@ def main():
                 print(f"  could not resolve CIK for {name} - skipping")
                 continue
             print(f"  resolved {name} -> CIK {cik}")
+            save_resolved_cik(conn, name, cik)
 
         fetch_institutional_holdings(name, cik, tracked, conn)
 
