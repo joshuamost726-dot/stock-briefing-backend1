@@ -774,7 +774,7 @@ function normalize(meta, raw) {
     status: (raw && raw.status) || 'neutral',
     headline: (raw && raw.headline) || 'No signal detected',
     detail: (raw && raw.detail) || '',
-    simpleExplanation: (raw && raw.simpleExplanation) || (raw && raw.headline) || 'No signal detected',
+    simpleExplanation: (raw && raw.simpleExplanation) || [(raw && raw.headline) || 'No signal detected'],
     positionContext: (raw && raw.positionContext) || null,
     validation: {
       timing:        v.timing        || 'No data available',

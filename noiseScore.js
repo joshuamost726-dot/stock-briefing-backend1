@@ -13,6 +13,7 @@
  */
 
 const Anthropic = require('@anthropic-ai/sdk');
+const { parseBulletArray } = require('./claudeBullets.js');
 const anthropic = process.env.ANTHROPIC_API_KEY ? new Anthropic() : null;
 
 function classify({ activeCount, statuses, totalSignals }) {
@@ -68,17 +69,19 @@ async function rewriteReasoning({ badge, headline, activeCount, totalSignals, po
     model: 'claude-haiku-4-5',
     max_tokens: 200,
     system:
-      'You write one short paragraph (2-4 sentences) explaining a stock conviction ' +
-      'verdict to a retail investor, given only these structured facts — do not add ' +
-      'facts not present in the input. Match this voice: plain, direct, conservative ' +
-      "about what the evidence supports, willing to say \"this isn't enough to act on\" " +
-      'when true. No hedging filler, no "as an AI", no bullet points — prose only. ' +
-      'The classification field is fixed and must not be contradicted, only explained.',
+      'You explain a stock conviction verdict to a retail investor, given only these structured ' +
+      'facts — do not add facts not present in the input. Match this voice: plain, direct, ' +
+      'conservative about what the evidence supports, willing to say "this isn\'t enough to act on" ' +
+      'when true. No hedging filler, no "as an AI". Respond with ONLY a raw JSON array of strings — ' +
+      'no markdown code fences, no text before or after it. Each string is one short, self-contained ' +
+      'bullet point (a phrase or short sentence, not a paragraph) — do not include a leading dash or ' +
+      'bullet character in the string itself. Aim for 2-3 bullets. The classification field is fixed ' +
+      'and must not be contradicted, only explained.',
     messages: [{ role: 'user', content: JSON.stringify(facts) }],
   });
 
   const text = message.content.find(b => b.type === 'text')?.text?.trim();
-  return text || fallback;
+  return parseBulletArray(text, fallback);
 }
 
 async function getVerdict({ activeCount, statuses, priceTarget, totalSignals }) {
@@ -90,7 +93,7 @@ async function getVerdict({ activeCount, statuses, priceTarget, totalSignals }) 
   }
 
   const { badge, headline, reasoning, positiveCount, negativeCount } = classify({ activeCount, statuses, totalSignals });
-  const fallbackReasoning = reasoning + priceTargetSentence;
+  const fallbackReasoning = [reasoning, priceTargetSentence.trim()].filter(Boolean);
 
   if (!anthropic) {
     return { badge, headline, reasoning: fallbackReasoning };

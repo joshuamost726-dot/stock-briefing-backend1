@@ -22,6 +22,7 @@
  */
 
 const Anthropic = require('@anthropic-ai/sdk');
+const { parseBulletArray } = require('./claudeBullets.js');
 const anthropic = process.env.ANTHROPIC_API_KEY ? new Anthropic() : null;
 
 const POSITION_REASONING_GUIDANCE =
@@ -39,7 +40,7 @@ const POSITION_REASONING_GUIDANCE =
   'true (13F implied average, not a real trade price), say so plainly rather than treating it as exact.';
 
 async function explainSignalPlainly({ headline, detail, positionContext }) {
-  const fallback = headline;
+  const fallback = [headline];
 
   if (!anthropic) return fallback;
 
@@ -50,18 +51,21 @@ async function explainSignalPlainly({ headline, detail, positionContext }) {
       model: 'claude-haiku-4-5',
       max_tokens: hasPositionContext ? 320 : 120,
       system:
-        'You explain one financial data signal to a retail investor in short, plain sentences — ' +
-        'what it found and what it means, using only the structured facts given. Do not add facts ' +
-        'not present in the input. If a ticker symbol appears in the input, use it exactly as given — ' +
-        'never guess or expand what company name it might stand for; if you don\'t already know the ' +
-        'company, just use the ticker as-is. No hedging filler, no "as an AI", no bullet points — ' +
-        'prose only. ' +
-        (hasPositionContext ? POSITION_REASONING_GUIDANCE : 'Keep it to 1-2 sentences.'),
+        'You explain one financial data signal to a retail investor, using only the structured facts ' +
+        'given. Do not add facts not present in the input. If a ticker symbol appears in the input, use ' +
+        'it exactly as given — never guess or expand what company name it might stand for; if you ' +
+        'don\'t already know the company, just use the ticker as-is. No hedging filler, no "as an AI". ' +
+        'Respond with ONLY a raw JSON array of strings — no markdown code fences, no text before or ' +
+        'after it. Each string is one short, self-contained bullet point (a phrase or short sentence, ' +
+        'not a paragraph) — do not include a leading dash or bullet character in the string itself. ' +
+        (hasPositionContext
+          ? POSITION_REASONING_GUIDANCE + ' Aim for 2-3 bullets total.'
+          : 'Aim for 1-2 bullets: what the signal found, and what it means.'),
       messages: [{ role: 'user', content: JSON.stringify({ headline, detail, positionContext }) }],
     });
 
     const text = message.content.find(b => b.type === 'text')?.text?.trim();
-    return text || fallback;
+    return parseBulletArray(text, fallback);
   } catch (err) {
     console.error('Signal explanation rewrite failed, using rule-based headline:', err);
     return fallback;

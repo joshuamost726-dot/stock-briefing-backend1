@@ -27,13 +27,14 @@
  */
 
 const Anthropic = require('@anthropic-ai/sdk');
+const { parseBulletArray } = require('./claudeBullets.js');
 const anthropic = process.env.ANTHROPIC_API_KEY ? new Anthropic() : null;
 
 async function getAiTake({ ticker, companyName, quote, profile, convictionScore, tier, bottomLine, plainParts, priceTarget, position, positionAdvice, signalPriceContexts }) {
   if (!anthropic) {
     return {
       available: false,
-      text: 'AI commentary is unavailable right now (no API key configured).',
+      bullets: ['AI commentary is unavailable right now (no API key configured).'],
     };
   }
 
@@ -80,8 +81,10 @@ async function getAiTake({ ticker, companyName, quote, profile, convictionScore,
         'risks. You may agree or disagree with this tool\'s own computed verdict; say so plainly if you ' +
         'do. Be direct about uncertainty and about what would change your mind — don\'t perform ' +
         'confidence you don\'t have. Plain, casual, no hedging filler, no "as an AI", no financial advice ' +
-        'disclaimers (the product already labels this as commentary, not advice). Prose only, no bullet ' +
-        'points.' +
+        'disclaimers (the product already labels this as commentary, not advice). Respond with ONLY a ' +
+        'raw JSON array of strings — no markdown code fences, no text before or after it. Each string ' +
+        'is one short, self-contained bullet point (a phrase or short sentence, not a paragraph) — do ' +
+        'not include a leading dash or bullet character in the string itself.' +
         (hasPosition
           ? ' The user has a real position here (userPosition) — this is the one place in the whole app ' +
             'that should directly answer "what should I do with MY position," not just describe the stock ' +
@@ -93,16 +96,16 @@ async function getAiTake({ ticker, companyName, quote, profile, convictionScore,
             'argues against panic-selling; buying below is more ambiguous and worth naming as such, not ' +
             'spun as automatically bullish or bearish). Give a real answer on hold/add/trim/sell given all ' +
             'of this together, in your own words — not just repeating toolsPositionAdjustedAction. Aim for ' +
-            '4-6 sentences given there\'s more to cover.'
-          : ' Give this in 3-5 sentences.'),
+            '4-6 bullets given there\'s more to cover.'
+          : ' Aim for 3-5 bullets.'),
       messages: [{ role: 'user', content: JSON.stringify(context) }],
     });
 
     const text = message.content.find(b => b.type === 'text')?.text?.trim();
-    return { available: true, text: text || 'No response generated.' };
+    return { available: true, bullets: parseBulletArray(text, ['No response generated.']) };
   } catch (err) {
     console.error(`AI take generation failed for ${ticker}:`, err);
-    return { available: false, text: 'AI commentary failed to generate this time — try reloading.' };
+    return { available: false, bullets: ['AI commentary failed to generate this time — try reloading.'] };
   }
 }
 
