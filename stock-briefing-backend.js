@@ -53,6 +53,8 @@ const { getUpcomingEvents } = require('./upcomingEvents.js');
 const { getAiTake } = require('./aiTakeScore.js');
 const { applyPositionAwareAdvice } = require('./positionAdvice.js');
 const { getEarningsSurpriseSignal } = require('./earningsSurpriseScore.js');
+const { extractCompanyEvents } = require('./companyEventsScore.js');
+const { explainPriceMove } = require('./priceMoveExplainer.js');
 
 // Scores analyst consensus 0-100 from Finnhub recommendation trends.
 function getAnalystSignal(recommendations) {
@@ -122,7 +124,7 @@ async function computeAllSignals(ticker, stockData, position = null) {
     const insider = await getInsiderBuyingSignal(ticker, position);
 
     if (insider.hasSignal && insider.confidenceScore > 0) {
-      scores.push(insider.confidenceScore);
+      scores.push({ id: 'insider_buying', score: insider.confidenceScore });
       plainParts.push(insider.explanation);
     }
     const insiderActive = insider.hasSignal && insider.confidenceScore > 0;
@@ -173,7 +175,12 @@ async function computeAllSignals(ticker, stockData, position = null) {
     const d = signal?.detail || {};
 
     if (instScore > 0) {
-      scores.push(instScore);
+      // signal.multiplier (0.4x-1.3x, see convictionScore.js's labelFor())
+      // reflects how much momentum data backs this particular reading —
+      // thread it through as a per-instance weight adjustment instead of
+      // letting a low-confidence "ownership only" snapshot count exactly as
+      // much as a high-conviction, momentum-confirmed one.
+      scores.push({ id: 'institutional_buying', score: instScore, instanceMultiplier: signal.multiplier });
       plainParts.push(signal.explanation);
     }
 
@@ -219,7 +226,7 @@ async function computeAllSignals(ticker, stockData, position = null) {
         ? 100 - shortInt.confidenceScore
         : 50;
 
-      scores.push(bullishContribution);
+      scores.push({ id: 'short_interest', score: bullishContribution });
       plainParts.push(shortInt.explanation);
     }
 
@@ -261,7 +268,7 @@ async function computeAllSignals(ticker, stockData, position = null) {
     const d = optVol.detail || {};
 
     if (optVol.hasSignal && optVol.confidenceScore > 0) {
-      scores.push(optVol.confidenceScore);
+      scores.push({ id: 'options_volume', score: optVol.confidenceScore });
       plainParts.push(optVol.explanation);
     }
 
@@ -303,7 +310,7 @@ async function computeAllSignals(ticker, stockData, position = null) {
     const d = congress.detail || {};
 
     if (congress.hasSignal && congress.confidenceScore > 0) {
-      scores.push(congress.confidenceScore);
+      scores.push({ id: 'congress_trading', score: congress.confidenceScore });
       plainParts.push(congress.explanation);
     }
 
@@ -347,7 +354,7 @@ async function computeAllSignals(ticker, stockData, position = null) {
     const d = gov.detail || {};
 
     if (gov.hasSignal && gov.confidenceScore > 0) {
-      scores.push(gov.confidenceScore);
+      scores.push({ id: 'gov_contracts', score: gov.confidenceScore });
       plainParts.push(gov.explanation);
     }
 
@@ -399,7 +406,7 @@ async function computeAllSignals(ticker, stockData, position = null) {
         ? 100 - offEx.confidenceScore
         : 50;
 
-      scores.push(bullishContribution);
+      scores.push({ id: 'off_exchange', score: bullishContribution });
       plainParts.push(offEx.explanation);
     }
 
@@ -482,7 +489,7 @@ async function computeAllSignals(ticker, stockData, position = null) {
     const d = korea.detail || {};
 
     if (korea.hasSignal && korea.confidenceScore > 0) {
-      scores.push(korea.confidenceScore);
+      scores.push({ id: 'korea_ownership', score: korea.confidenceScore });
       plainParts.push(korea.explanation);
     }
 
@@ -536,7 +543,7 @@ async function computeAllSignals(ticker, stockData, position = null) {
         ? 100 - koreaInst.confidenceScore
         : 50;
 
-      scores.push(bullishContribution);
+      scores.push({ id: 'korea_major_shareholder', score: bullishContribution });
       plainParts.push(koreaInst.explanation);
     }
 
@@ -588,7 +595,7 @@ async function computeAllSignals(ticker, stockData, position = null) {
         ? 100 - capActions.confidenceScore
         : 50;
 
-      scores.push(bullishContribution);
+      scores.push({ id: 'korea_capital_actions', score: bullishContribution });
       plainParts.push(capActions.explanation);
     }
 
@@ -636,7 +643,7 @@ async function computeAllSignals(ticker, stockData, position = null) {
         ? 100 - tech.confidenceScore
         : 50;
 
-      scores.push(bullishContribution);
+      scores.push({ id: 'technical_momentum', score: bullishContribution });
       plainParts.push(tech.explanation);
     }
 
@@ -676,7 +683,7 @@ async function computeAllSignals(ticker, stockData, position = null) {
   // Signal 2: Analyst ratings
   const analyst = getAnalystSignal(stockData.recommendations);
   if (analyst) {
-    scores.push(analyst.score);
+    scores.push({ id: 'analyst_rating', score: analyst.score });
     signalsById.analyst_rating = { ...analyst, hasData: true };
     plainParts.push(`Analyst consensus: ${analyst.headline}.`);
     activeStatuses.push(analyst.status);
@@ -685,13 +692,88 @@ async function computeAllSignals(ticker, stockData, position = null) {
   // Signal 3: Earnings surprise history
   const earningsSurprise = getEarningsSurpriseSignal(stockData.earningsSurpriseHistory);
   if (earningsSurprise) {
-    scores.push(earningsSurprise.score);
+    scores.push({ id: 'earnings_surprise', score: earningsSurprise.score });
     signalsById.earnings_surprise = { ...earningsSurprise, hasData: true };
     plainParts.push(`Earnings surprise history: ${earningsSurprise.headline}.`);
     activeStatuses.push(earningsSurprise.status);
   }
 
   return { signalsById, scores, plainParts, activeStatuses };
+}
+
+// Reliability weight per signal type — how much a signal should move the
+// overall conviction score, independent of what score it happens to report.
+// Based on how direct/timely/hard-to-fake each data source actually is:
+// real transaction disclosures with an enforced filing deadline outweigh
+// lagged/implied/opinion-based reads. This is what was missing before —
+// every active signal previously counted exactly the same regardless of
+// how much it should actually be trusted, which is the biggest reason the
+// aggregate score could feel arbitrary.
+const SIGNAL_WEIGHTS = {
+  insider_buying: 1.0,          // real Form 4 transaction, filed within 2 business days
+  korea_ownership: 1.0,         // Korean equivalent — real disclosed ownership change
+  earnings_surprise: 0.85,      // real reported actual-vs-estimate track record
+  institutional_buying: 0.75,   // 13F — real but lags up to 45 days, implied price only
+  korea_major_shareholder: 0.75,
+  short_interest: 0.65,         // real FINRA data, but a positioning proxy, not a trade
+  technical_momentum: 0.6,      // price-derived, no fundamental/disclosure content
+  korea_capital_actions: 0.6,
+  analyst_rating: 0.55,         // opinion-based, not a disclosed transaction
+  options_volume: 0.5,          // noisy, short-lived
+  off_exchange: 0.5,
+  congress_trading: 0.45,       // sparse, STOCK Act disclosure can lag up to 45 days
+  gov_contracts: 0.45,
+};
+
+// Turns the flat list of {id, score, instanceMultiplier?} entries collected
+// above into one aggregate 0-100 conviction score, weighted by how much each
+// signal type should actually be trusted (SIGNAL_WEIGHTS) and, where a
+// signal computes its own per-instance confidence (currently only
+// institutional_buying's momentum-availability multiplier), by that too.
+//
+// Coverage matters as much as the weighted average itself: a score built
+// from 2 of 12 applicable signals is a much shakier read than one built
+// from 9 of 12, even if the raw weighted average comes out identical. When
+// coverage is thin, the score is pulled toward neutral (50) proportional to
+// how much weight is missing — same "say 'I don't know' instead of a false
+// confident number" philosophy already used elsewhere in this codebase
+// (see convictionScore.js's MAX_SCORE_WITHOUT_MOMENTUM). Coverage is
+// measured against getApplicableSignalOrder(ticker), not the full 14, so a
+// ticker like SKHY isn't penalized for signals that are structurally
+// impossible for it anyway.
+function computeConviction(scores, ticker) {
+  if (scores.length === 0) {
+    return { score: 0, confidence: 'None', coveragePct: 0, breakdown: [] };
+  }
+
+  const totalApplicableWeight = getApplicableSignalOrder(ticker)
+    .reduce((sum, m) => sum + (SIGNAL_WEIGHTS[m.id] ?? 0.5), 0);
+
+  let weightedSum = 0;
+  let activeWeight = 0;
+  const breakdown = [];
+
+  for (const { id, score, instanceMultiplier } of scores) {
+    const w = (SIGNAL_WEIGHTS[id] ?? 0.5) * (instanceMultiplier ?? 1);
+    weightedSum += score * w;
+    activeWeight += w;
+    breakdown.push({ id, score, weight: Number(w.toFixed(2)) });
+  }
+
+  const rawScore = activeWeight > 0 ? weightedSum / activeWeight : 50;
+  const coverage = totalApplicableWeight > 0
+    ? Math.min(1, activeWeight / totalApplicableWeight)
+    : 1;
+
+  const score = Math.round(rawScore * coverage + 50 * (1 - coverage));
+  const confidence = coverage >= 0.55 ? 'High' : coverage >= 0.3 ? 'Medium' : 'Low';
+
+  // Biggest movers first — how far a signal pulls from neutral (50) times
+  // how much weight it carries, so the breakdown surfaces what actually
+  // drove the number rather than just listing signals in fetch order.
+  breakdown.sort((a, b) => Math.abs(b.score - 50) * b.weight - Math.abs(a.score - 50) * a.weight);
+
+  return { score, confidence, coveragePct: Math.round(coverage * 100), breakdown };
 }
 
 // Rewrites each data-bearing signal's headline into a short plain-English
@@ -1112,9 +1194,10 @@ app.get('/api/briefing/latest', async (req, res) => {
       stock.explanation = plainParts.length ? plainParts.join(' ') : 'No signal data available';
       stock.activeSignals = scores.length;
       stock.totalSignals = getApplicableSignalOrder(stock.ticker).length;
-      stock.convictionScore = scores.length
-        ? Math.round(scores.reduce((a, b) => a + b, 0) / scores.length)
-        : 0;
+      const conviction = computeConviction(scores, stock.ticker);
+      stock.convictionScore = conviction.score;
+      stock.scoreConfidence = conviction.confidence;
+      stock.scoreCoveragePct = conviction.coveragePct;
     }));
 
     res.json({ stocks: stocksData });
@@ -1145,9 +1228,11 @@ app.get('/api/ticker/:ticker', async (req, res) => {
 
     const { signalsById, scores, plainParts, activeStatuses } = await computeAllSignals(ticker, stockData, tracked.position || null);
 
-    const score = scores.length
-      ? Math.round(scores.reduce((a, b) => a + b, 0) / scores.length)
-      : 0;
+    const conviction = computeConviction(scores, ticker);
+    const score = conviction.score;
+    const scoreBreakdown = conviction.breakdown
+      .slice(0, 5)
+      .map(b => ({ ...b, label: SIGNAL_ORDER.find(m => m.id === b.id)?.label || b.id }));
 
     const rawTier = score >= 70 ? 'High' : score >= 50 ? 'Moderate' : 'Low';
     const rawAction = score >= 70 ? 'BUY' : score >= 50 ? 'HOLD' : 'SELL';
@@ -1165,14 +1250,21 @@ app.get('/api/ticker/:ticker', async (req, res) => {
       ? plainParts.join(' ')
       : `No signal data available for ${ticker} yet.`;
 
-    // The verdict, news explanations, upcoming dates, the AI take, and the
-    // per-signal-card Claude rewrites don't depend on each other — run all
-    // five concurrently instead of the signal-card rewrites finishing first
-    // (which is what happened while that step lived inside
-    // computeAllSignals). (aiTake used to wait on the verdict just to
-    // mention it as context; it gets the same score/tier directly instead,
-    // so that dependency was removable.)
-    const [{ badge, headline, reasoning }, newsWithMeaning, upcoming, aiTake] = await Promise.all([
+    // companyEvents only needs stockData/priceTarget (already resolved), so
+    // it can start alongside everything else below; priceMove needs
+    // companyEvents' result, so it's chained off that same promise rather
+    // than blocking the whole batch on it finishing first.
+    const companyEventsPromise = extractCompanyEvents(ticker, tracked.name, stockData.news, priceTarget, stockData.quote);
+
+    // The verdict, news explanations, upcoming dates, the AI take, the
+    // per-signal-card Claude rewrites, company events, and the price-move
+    // explainer don't depend on each other (aside from priceMove on
+    // companyEvents, handled via the chain above) — run them all
+    // concurrently instead of one finishing before the next starts.
+    // (aiTake used to wait on the verdict just to mention it as context; it
+    // gets the same score/tier directly instead, so that dependency was
+    // removable.)
+    const [{ badge, headline, reasoning }, newsWithMeaning, upcoming, aiTake, , companyEvents, priceMove] = await Promise.all([
       getVerdict({
         activeCount: scores.length,
         statuses: activeStatuses,
@@ -1198,6 +1290,15 @@ app.get('/api/ticker/:ticker', async (req, res) => {
         ].filter(Boolean),
       }),
       explainSignalsPlainly(signalsById),
+      companyEventsPromise,
+      companyEventsPromise.then(events => explainPriceMove({
+        ticker,
+        companyName: tracked.name,
+        changePercent: stockData.quote.changePercent,
+        news: stockData.news,
+        companyEvents: events,
+        plainParts,
+      })),
     ]);
 
     const bottomLine = { verdict: headline, reasoning };
@@ -1209,12 +1310,17 @@ app.get('/api/ticker/:ticker', async (req, res) => {
       profile: stockData.profile,
       priceTarget,
       convictionScore: score,
+      scoreConfidence: conviction.confidence,
+      scoreCoveragePct: conviction.coveragePct,
+      scoreBreakdown,
       tier,
       action,
       activeSignals: scores.length,
       signalQuality: { badge, headline },
       plainEnglish: signalsSummary,
       bottomLine,
+      priceMove,
+      companyEvents,
       news: newsWithMeaning,
       upcoming,
       aiTake,
