@@ -56,8 +56,9 @@ async function explainSignalPlainly({ headline, detail, positionContext }) {
         'it exactly as given — never guess or expand what company name it might stand for; if you ' +
         'don\'t already know the company, just use the ticker as-is. No hedging filler, no "as an AI". ' +
         'Respond with ONLY a raw JSON array of strings — no markdown code fences, no text before or ' +
-        'after it. Each string is one short, self-contained bullet point (a phrase or short sentence, ' +
-        'not a paragraph) — do not include a leading dash or bullet character in the string itself. ' +
+        'after it. Each string is exactly ONE short sentence, one idea only — do not chain two thoughts ' +
+        'together with a semicolon, em-dash, or "and"; if you have two ideas, that\'s two separate array ' +
+        'entries, not one long one. Do not include a leading dash or bullet character in the string itself. ' +
         (hasPositionContext
           ? POSITION_REASONING_GUIDANCE + ' Aim for 2-3 bullets total.'
           : 'Aim for 1-2 bullets: what the signal found, and what it means.'),

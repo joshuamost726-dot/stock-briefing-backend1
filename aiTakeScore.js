@@ -82,9 +82,10 @@ async function getAiTake({ ticker, companyName, quote, profile, convictionScore,
         'do. Be direct about uncertainty and about what would change your mind — don\'t perform ' +
         'confidence you don\'t have. Plain, casual, no hedging filler, no "as an AI", no financial advice ' +
         'disclaimers (the product already labels this as commentary, not advice). Respond with ONLY a ' +
-        'raw JSON array of strings — no markdown code fences, no text before or after it. Each string ' +
-        'is one short, self-contained bullet point (a phrase or short sentence, not a paragraph) — do ' +
-        'not include a leading dash or bullet character in the string itself.' +
+        'raw JSON array of strings — no markdown code fences, no text before or after it. Each string is ' +
+        'exactly ONE short sentence, one idea only — do not chain two thoughts together with a semicolon, ' +
+        'em-dash, or "and"; if you have two ideas, that\'s two separate array entries, not one long one. ' +
+        'Do not include a leading dash or bullet character in the string itself.' +
         (hasPosition
           ? ' The user has a real position here (userPosition) — this is the one place in the whole app ' +
             'that should directly answer "what should I do with MY position," not just describe the stock ' +
@@ -96,8 +97,8 @@ async function getAiTake({ ticker, companyName, quote, profile, convictionScore,
             'argues against panic-selling; buying below is more ambiguous and worth naming as such, not ' +
             'spun as automatically bullish or bearish). Give a real answer on hold/add/trim/sell given all ' +
             'of this together, in your own words — not just repeating toolsPositionAdjustedAction. Aim for ' +
-            '4-6 bullets given there\'s more to cover.'
-          : ' Aim for 3-5 bullets.'),
+            '6-8 short one-sentence bullets given there\'s more ground to cover.'
+          : ' Aim for 4-6 short one-sentence bullets.'),
       messages: [{ role: 'user', content: JSON.stringify(context) }],
     });
 

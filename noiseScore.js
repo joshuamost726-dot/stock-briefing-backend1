@@ -73,10 +73,11 @@ async function rewriteReasoning({ badge, headline, activeCount, totalSignals, po
       'facts — do not add facts not present in the input. Match this voice: plain, direct, ' +
       'conservative about what the evidence supports, willing to say "this isn\'t enough to act on" ' +
       'when true. No hedging filler, no "as an AI". Respond with ONLY a raw JSON array of strings — ' +
-      'no markdown code fences, no text before or after it. Each string is one short, self-contained ' +
-      'bullet point (a phrase or short sentence, not a paragraph) — do not include a leading dash or ' +
-      'bullet character in the string itself. Aim for 2-3 bullets. The classification field is fixed ' +
-      'and must not be contradicted, only explained.',
+      'no markdown code fences, no text before or after it. Each string is exactly ONE short sentence, ' +
+      'one idea only — do not chain two thoughts together with a semicolon, em-dash, or "and"; if you ' +
+      'have two ideas, that\'s two separate array entries, not one long one. Do not include a leading ' +
+      'dash or bullet character in the string itself. Aim for 2-3 bullets. The classification field is ' +
+      'fixed and must not be contradicted, only explained.',
     messages: [{ role: 'user', content: JSON.stringify(facts) }],
   });
 
