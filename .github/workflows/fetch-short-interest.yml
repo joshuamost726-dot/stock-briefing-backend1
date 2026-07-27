@@ -28,3 +28,11 @@ jobs:
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: python fetch_short_interest.py
+
+      - name: Ping healthchecks.io (success)
+        if: success()
+        run: curl -fsS -m 10 --retry 3 https://hc-ping.com/6c6cd12a-e6ac-48bf-9566-c5aa629e3ff0 > /dev/null
+
+      - name: Ping healthchecks.io (failure)
+        if: failure()
+        run: curl -fsS -m 10 --retry 3 https://hc-ping.com/6c6cd12a-e6ac-48bf-9566-c5aa629e3ff0/fail > /dev/null

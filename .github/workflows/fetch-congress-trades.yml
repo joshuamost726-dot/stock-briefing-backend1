@@ -26,3 +26,11 @@ jobs:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           QUIVER_API_KEY: ${{ secrets.QUIVER_API_KEY }}
         run: python fetch_congress_trades.py
+
+      - name: Ping healthchecks.io (success)
+        if: success()
+        run: curl -fsS -m 10 --retry 3 https://hc-ping.com/0d96ac6b-678b-4ea8-a182-fabb05e919fc > /dev/null
+
+      - name: Ping healthchecks.io (failure)
+        if: failure()
+        run: curl -fsS -m 10 --retry 3 https://hc-ping.com/0d96ac6b-678b-4ea8-a182-fabb05e919fc/fail > /dev/null

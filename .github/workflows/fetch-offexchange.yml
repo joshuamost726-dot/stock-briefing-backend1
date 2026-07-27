@@ -27,3 +27,11 @@ jobs:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           QUIVER_API_KEY: ${{ secrets.QUIVER_API_KEY }}
         run: python fetch_offexchange.py
+
+      - name: Ping healthchecks.io (success)
+        if: success()
+        run: curl -fsS -m 10 --retry 3 https://hc-ping.com/189a9aae-7c73-4165-9d43-c9e536bd3f57 > /dev/null
+
+      - name: Ping healthchecks.io (failure)
+        if: failure()
+        run: curl -fsS -m 10 --retry 3 https://hc-ping.com/189a9aae-7c73-4165-9d43-c9e536bd3f57/fail > /dev/null

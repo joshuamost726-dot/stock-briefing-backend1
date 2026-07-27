@@ -39,3 +39,11 @@ jobs:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           OPENDART_API_KEY: ${{ secrets.OPENDART_API_KEY }}
         run: python fetch_korea_capital_actions.py
+
+      - name: Ping healthchecks.io (success)
+        if: success()
+        run: curl -fsS -m 10 --retry 3 https://hc-ping.com/e56b69c0-a821-465f-9e8c-64d5e9a11615 > /dev/null
+
+      - name: Ping healthchecks.io (failure)
+        if: failure()
+        run: curl -fsS -m 10 --retry 3 https://hc-ping.com/e56b69c0-a821-465f-9e8c-64d5e9a11615/fail > /dev/null

@@ -25,3 +25,11 @@ jobs:
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: python fetch_options_volume.py
+
+      - name: Ping healthchecks.io (success)
+        if: success()
+        run: curl -fsS -m 10 --retry 3 https://hc-ping.com/b499be95-9aaa-498f-9eb8-9c561b34941e > /dev/null
+
+      - name: Ping healthchecks.io (failure)
+        if: failure()
+        run: curl -fsS -m 10 --retry 3 https://hc-ping.com/b499be95-9aaa-498f-9eb8-9c561b34941e/fail > /dev/null

@@ -27,3 +27,11 @@ jobs:
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: python sweep_13f.py
+
+      - name: Ping healthchecks.io (success)
+        if: success()
+        run: curl -fsS -m 10 --retry 3 https://hc-ping.com/0ea2b3ed-dd06-4a0c-92f8-ec8753d302f7 > /dev/null
+
+      - name: Ping healthchecks.io (failure)
+        if: failure()
+        run: curl -fsS -m 10 --retry 3 https://hc-ping.com/0ea2b3ed-dd06-4a0c-92f8-ec8753d302f7/fail > /dev/null
