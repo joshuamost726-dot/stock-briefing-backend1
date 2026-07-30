@@ -1,6 +1,7 @@
 const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
+const crypto = require('crypto');
 const { Pool } = require('pg');
 
 // Used directly by this file for routes that read daily_prices (price
@@ -914,6 +915,39 @@ const app = express();
 // trades can run past that easily.
 app.use(express.json({ limit: '5mb' }));
 app.use(cors());
+
+// Access gate — a single shared code, not a full account system. Added
+// before any public launch so a random visitor who finds the URL can't run
+// up API costs (Quiver Quantitative, Claude, etc.) or trigger the on-demand
+// per-ticker data backfill. If ACCESS_CODE isn't set (e.g. plain local dev),
+// the gate is a no-op rather than locking out development.
+const ACCESS_CODE = process.env.ACCESS_CODE;
+
+function timingSafeEqualStrings(a, b) {
+  const bufA = Buffer.from(a);
+  const bufB = Buffer.from(b);
+  // timingSafeEqual throws on mismatched lengths — comparing against a
+  // same-length hash of both sides keeps the length check itself constant
+  // time instead of short-circuiting on a wrong-length guess.
+  const hashA = crypto.createHash('sha256').update(bufA).digest();
+  const hashB = crypto.createHash('sha256').update(bufB).digest();
+  return crypto.timingSafeEqual(hashA, hashB);
+}
+
+app.post('/api/auth/verify', (req, res) => {
+  if (!ACCESS_CODE) return res.json({ valid: true });
+  const code = String(req.body?.code || '');
+  res.json({ valid: timingSafeEqualStrings(code, ACCESS_CODE) });
+});
+
+app.use((req, res, next) => {
+  if (!ACCESS_CODE) return next();
+  const provided = String(req.headers['x-access-code'] || '');
+  if (!timingSafeEqualStrings(provided, ACCESS_CODE)) {
+    return res.status(401).json({ error: 'Access code required' });
+  }
+  next();
+});
 
 // Tracked stocks + cost-basis positions live in tracked_companies (Postgres)
 // rather than a local data.json file. That file used to sit on a persistent
