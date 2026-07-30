@@ -1253,6 +1253,138 @@ app.get('/api/briefing/latest', async (req, res) => {
   }
 });
    
+// Builds the full ticker-detail payload (signals, conviction score, bottom
+// line, Ask Claude, news, etc). `tracked` may be null — used by
+// /api/buy-check/:ticker for a ticker the user hasn't added to tracking yet,
+// falling back to the live company profile name and no position/cost basis.
+// Throws Error('TICKER_NOT_FOUND') if the ticker has no live quote data at
+// all, so callers can 404 instead of the generic 500.
+async function buildTickerDetail(ticker, tracked) {
+  // stockData (Finnhub/NewsAPI) and priceTarget (Yahoo) are independent —
+  // no reason to fetch them one after another.
+  const [stockData, priceTargetResult] = await Promise.all([
+    getStockData(ticker),
+    getPriceTarget(ticker).catch(err => {
+      console.error(`Price target lookup failed for ${ticker}:`, err);
+      return null;
+    }),
+  ]);
+  const priceTarget = priceTargetResult;
+
+  // Finnhub returns a 200 with an all-zero quote (not an error) for an
+  // unknown symbol, so a missing/zero price is the real "not found" signal,
+  // not just a missing quote object.
+  if (stockData.error || !stockData.quote || !stockData.quote.price) {
+    throw new Error('TICKER_NOT_FOUND');
+  }
+
+  const companyName = tracked?.name || stockData.profile?.name || ticker;
+  const position = tracked?.position || null;
+
+  const { signalsById, scores, plainParts, activeStatuses } = await computeAllSignals(ticker, stockData, position);
+
+  const conviction = computeConviction(scores, ticker);
+  const score = conviction.score;
+  const scoreBreakdown = conviction.breakdown
+    .slice(0, 5)
+    .map(b => ({ ...b, label: SIGNAL_ORDER.find(m => m.id === b.id)?.label || b.id }));
+
+  const rawTier = score >= 70 ? 'High' : score >= 50 ? 'Moderate' : 'Low';
+  const rawAction = score >= 70 ? 'BUY' : score >= 50 ? 'HOLD' : 'SELL';
+
+  const positionAdvice = applyPositionAwareAdvice({
+    score,
+    tier: rawTier,
+    action: rawAction,
+    currentPrice: stockData.quote.price,
+    position,
+  });
+  const { tier, action } = positionAdvice;
+
+  const signalsSummary = plainParts.length
+    ? plainParts.join(' ')
+    : `No signal data available for ${ticker} yet.`;
+
+  // companyEvents only needs stockData/priceTarget (already resolved), so
+  // it can start alongside everything else below; priceMove needs
+  // companyEvents' result, so it's chained off that same promise rather
+  // than blocking the whole batch on it finishing first.
+  const companyEventsPromise = extractCompanyEvents(ticker, companyName, stockData.news, priceTarget, stockData.quote);
+
+  // The verdict, news explanations, upcoming dates, the AI take, the
+  // per-signal-card Claude rewrites, company events, and the price-move
+  // explainer don't depend on each other (aside from priceMove on
+  // companyEvents, handled via the chain above) — run them all
+  // concurrently instead of one finishing before the next starts.
+  // (aiTake used to wait on the verdict just to mention it as context; it
+  // gets the same score/tier directly instead, so that dependency was
+  // removable.)
+  const [{ badge, headline, reasoning }, newsWithMeaning, upcoming, aiTake, , companyEvents, priceMove] = await Promise.all([
+    getVerdict({
+      activeCount: scores.length,
+      statuses: activeStatuses,
+      priceTarget,
+      totalSignals: getApplicableSignalOrder(ticker).length,
+    }),
+    explainNewsForTicker(ticker, companyName, stockData.news),
+    Promise.resolve(getUpcomingEvents(stockData.nextEarnings)),
+    getAiTake({
+      ticker,
+      companyName,
+      quote: stockData.quote,
+      profile: stockData.profile,
+      convictionScore: score,
+      tier,
+      plainParts,
+      priceTarget,
+      position,
+      positionAdvice,
+      signalPriceContexts: [
+        signalsById.insider_buying?.positionContext && { signal: 'insider_buying', ...signalsById.insider_buying.positionContext },
+        signalsById.institutional_buying?.positionContext && { signal: 'institutional_buying', ...signalsById.institutional_buying.positionContext },
+      ].filter(Boolean),
+    }),
+    explainSignalsPlainly(signalsById),
+    companyEventsPromise,
+    companyEventsPromise.then(events => explainPriceMove({
+      ticker,
+      companyName,
+      changePercent: stockData.quote.changePercent,
+      news: stockData.news,
+      companyEvents: events,
+      plainParts,
+    })),
+  ]);
+
+  const bottomLine = { verdict: headline, reasoning };
+
+  return {
+    ticker,
+    companyName,
+    quote: stockData.quote,
+    profile: stockData.profile,
+    priceTarget,
+    convictionScore: score,
+    scoreConfidence: conviction.confidence,
+    scoreCoveragePct: conviction.coveragePct,
+    scoreBreakdown,
+    tier,
+    action,
+    activeSignals: scores.length,
+    signalQuality: { badge, headline },
+    plainEnglish: signalsSummary,
+    bottomLine,
+    priceMove,
+    companyEvents,
+    news: newsWithMeaning,
+    upcoming,
+    aiTake,
+    position,
+    positionAdvice,
+    signals: getApplicableSignalOrder(ticker).map(m => normalize(m, signalsById[m.id]))
+  };
+}
+
 app.get('/api/ticker/:ticker', async (req, res) => {
   const ticker = String(req.params.ticker || '').toUpperCase();
   const tracked = await getTrackedStock(ticker);
@@ -1262,122 +1394,37 @@ app.get('/api/ticker/:ticker', async (req, res) => {
   }
 
   try {
-    // stockData (Finnhub/NewsAPI) and priceTarget (Yahoo) are independent —
-    // no reason to fetch them one after another.
-    const [stockData, priceTargetResult] = await Promise.all([
-      getStockData(ticker),
-      getPriceTarget(ticker).catch(err => {
-        console.error(`Price target lookup failed for ${ticker}:`, err);
-        return null;
-      }),
-    ]);
-    const priceTarget = priceTargetResult;
-
-    const { signalsById, scores, plainParts, activeStatuses } = await computeAllSignals(ticker, stockData, tracked.position || null);
-
-    const conviction = computeConviction(scores, ticker);
-    const score = conviction.score;
-    const scoreBreakdown = conviction.breakdown
-      .slice(0, 5)
-      .map(b => ({ ...b, label: SIGNAL_ORDER.find(m => m.id === b.id)?.label || b.id }));
-
-    const rawTier = score >= 70 ? 'High' : score >= 50 ? 'Moderate' : 'Low';
-    const rawAction = score >= 70 ? 'BUY' : score >= 50 ? 'HOLD' : 'SELL';
-
-    const positionAdvice = applyPositionAwareAdvice({
-      score,
-      tier: rawTier,
-      action: rawAction,
-      currentPrice: stockData.quote.price,
-      position: tracked.position || null,
-    });
-    const { tier, action } = positionAdvice;
-
-    const signalsSummary = plainParts.length
-      ? plainParts.join(' ')
-      : `No signal data available for ${ticker} yet.`;
-
-    // companyEvents only needs stockData/priceTarget (already resolved), so
-    // it can start alongside everything else below; priceMove needs
-    // companyEvents' result, so it's chained off that same promise rather
-    // than blocking the whole batch on it finishing first.
-    const companyEventsPromise = extractCompanyEvents(ticker, tracked.name, stockData.news, priceTarget, stockData.quote);
-
-    // The verdict, news explanations, upcoming dates, the AI take, the
-    // per-signal-card Claude rewrites, company events, and the price-move
-    // explainer don't depend on each other (aside from priceMove on
-    // companyEvents, handled via the chain above) — run them all
-    // concurrently instead of one finishing before the next starts.
-    // (aiTake used to wait on the verdict just to mention it as context; it
-    // gets the same score/tier directly instead, so that dependency was
-    // removable.)
-    const [{ badge, headline, reasoning }, newsWithMeaning, upcoming, aiTake, , companyEvents, priceMove] = await Promise.all([
-      getVerdict({
-        activeCount: scores.length,
-        statuses: activeStatuses,
-        priceTarget,
-        totalSignals: getApplicableSignalOrder(ticker).length,
-      }),
-      explainNewsForTicker(ticker, tracked.name, stockData.news),
-      Promise.resolve(getUpcomingEvents(stockData.nextEarnings)),
-      getAiTake({
-        ticker,
-        companyName: tracked.name,
-        quote: stockData.quote,
-        profile: stockData.profile,
-        convictionScore: score,
-        tier,
-        plainParts,
-        priceTarget,
-        position: tracked.position || null,
-        positionAdvice,
-        signalPriceContexts: [
-          signalsById.insider_buying?.positionContext && { signal: 'insider_buying', ...signalsById.insider_buying.positionContext },
-          signalsById.institutional_buying?.positionContext && { signal: 'institutional_buying', ...signalsById.institutional_buying.positionContext },
-        ].filter(Boolean),
-      }),
-      explainSignalsPlainly(signalsById),
-      companyEventsPromise,
-      companyEventsPromise.then(events => explainPriceMove({
-        ticker,
-        companyName: tracked.name,
-        changePercent: stockData.quote.changePercent,
-        news: stockData.news,
-        companyEvents: events,
-        plainParts,
-      })),
-    ]);
-
-    const bottomLine = { verdict: headline, reasoning };
-
-    res.json({
-      ticker,
-      companyName: tracked.name || ticker,
-      quote: stockData.quote,
-      profile: stockData.profile,
-      priceTarget,
-      convictionScore: score,
-      scoreConfidence: conviction.confidence,
-      scoreCoveragePct: conviction.coveragePct,
-      scoreBreakdown,
-      tier,
-      action,
-      activeSignals: scores.length,
-      signalQuality: { badge, headline },
-      plainEnglish: signalsSummary,
-      bottomLine,
-      priceMove,
-      companyEvents,
-      news: newsWithMeaning,
-      upcoming,
-      aiTake,
-      position: tracked.position || null,
-      positionAdvice,
-      signals: getApplicableSignalOrder(ticker).map(m => normalize(m, signalsById[m.id]))
-    });
+    res.json(await buildTickerDetail(ticker, tracked));
   } catch (error) {
     console.error(`[ticker/${ticker}]`, error);
     res.status(500).json({ error: 'Failed to build ticker detail' });
+  }
+});
+
+// "Should I Buy?" — same full breakdown as /api/ticker/:ticker, but works
+// for a ticker the user hasn't added to tracking yet (tracked=null), so
+// they can get an instant first look before committing to full tracking.
+// An untracked ticker only has live-fetched signals available (analyst
+// rating, earnings surprise history) — everything sourced from the Python/
+// Postgres pipeline (insider buying, congressional trading, etc.) will show
+// as "no data yet" until they track it and the scheduled jobs run.
+app.get('/api/buy-check/:ticker', async (req, res) => {
+  const ticker = String(req.params.ticker || '').toUpperCase();
+  if (!/^[A-Z][A-Z0-9.]{0,9}$/.test(ticker)) {
+    return res.status(400).json({ error: `"${ticker}" doesn't look like a valid ticker symbol.` });
+  }
+
+  const tracked = await getTrackedStock(ticker);
+
+  try {
+    const detail = await buildTickerDetail(ticker, tracked);
+    res.json({ ...detail, isTracked: !!tracked });
+  } catch (error) {
+    if (error.message === 'TICKER_NOT_FOUND') {
+      return res.status(404).json({ error: `No market data found for "${ticker}" — double check the ticker symbol.` });
+    }
+    console.error(`[buy-check/${ticker}]`, error);
+    res.status(500).json({ error: 'Failed to build buy check' });
   }
 });
 
