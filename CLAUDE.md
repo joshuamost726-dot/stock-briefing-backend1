@@ -154,6 +154,40 @@ position is the riskier chase pattern). SELL/HOLD are never blocked by position 
 (`cost_per_share`, `shares`, `position_updated_at`) lives on `tracked_companies` in Postgres — see
 "Data flow" below.
 
+### Brokerage position import (added 2026-07-30)
+
+Two credential-free-for-Robinhood ways to fill in real positions instead of typing them into
+Settings by hand, both feeding the same review-then-write path:
+
+- **CSV import** (`positionImport.js`, `POST /api/positions/preview-csv`) — Robinhood has no
+  official API, so the safe alternative is the user exporting their own CSV and uploading it.
+  Hand-rolled CSV parser (RFC4180-ish, no dependency — matches this codebase's existing
+  no-external-library preference) auto-detects two shapes: a direct positions export (ticker/
+  shares/cost columns) or a Robinhood-style transaction history (Instrument/Trans Code/Quantity/
+  Price/date columns), the latter reconstructed into current shares + average cost basis by
+  replaying every Buy/Sell chronologically (average-cost method, same as Robinhood's own default).
+  No date column present → assumes the file is newest-first (the normal export order) and reverses
+  it, flagged as a warning rather than silently trusted.
+- **E*TRADE sync** (`etradeAuth.js`, `etradeSync.js`) — E*TRADE has a real official API (3-legged
+  OAuth 1.0a, signed via the `oauth-1.0a` package — the one place in this codebase that reaches for
+  a library instead of hand-rolling, since HMAC signing is exactly the kind of thing not worth
+  getting subtly wrong). The user's E*TRADE password is never seen by this app; they authorize on
+  E*TRADE's own site and paste back a verification code. Tokens live in a new `broker_connections`
+  table (`ensureSchema()` in `stock-briefing-backend.js`, run once at startup — the first table the
+  Node backend creates itself rather than a Python fetch script). Defaults to E*TRADE's Sandbox
+  environment (`ETRADE_ENV` unset/`sandbox`) until explicitly set to `live`. **Not yet exercised
+  against a real E*TRADE account** — building it required the user's own developer-app credentials,
+  which weren't available; the request-token call was verified against E*TRADE's real Sandbox host
+  with placeholder keys and got back a correctly-formed `oauth_problem=consumer_key_unknown`
+  rejection (i.e. the request itself round-trips correctly, only the fake key was rejected), which
+  is as far as this could be confirmed without the user completing the actual OAuth handshake.
+
+Both sources produce the same `{ticker, shares, costPerShare, isTracked}` shape and are reviewed/
+edited in the frontend (`PositionReviewTable` in `Settings.jsx`) before anything is written — the
+single write path is `POST /api/positions/apply`, which also handles auto-tracking a ticker that
+isn't tracked yet (`trackNewTicker()`, shared with `POST /api/stocks` rather than duplicated).
+Read-only by design: neither path ever calls a trading/order endpoint.
+
 ### Data flow
 
 1. GitHub Actions cron jobs run the Python scripts on independent schedules (see
@@ -200,7 +234,11 @@ Two layers, deliberately redundant since they catch different failure modes:
 
 Backend (Render): `FINNHUB_API_KEY`, `NEWS_API_KEY`, `DATABASE_URL` (Neon connection string),
 `ANTHROPIC_API_KEY` (optional — without it, Claude-written bullets fall back to rule-based text
-everywhere), `ALPHA_VANTAGE_KEY` (documented but not currently called by any code path). Frontend
+everywhere), `ALPHA_VANTAGE_KEY` (documented but not currently called by any code path),
+`ETRADE_CONSUMER_KEY`/`ETRADE_CONSUMER_SECRET` (optional — without them, Settings' Connect E*TRADE
+section shows setup instructions instead of a working Connect button; see "Brokerage position
+import" above), `ETRADE_ENV` (optional, defaults to `sandbox`; must be explicitly `live` to touch a
+real account). Frontend
 (Vercel): `REACT_APP_API_URL` (must point at the Render backend's URL — this is baked in at React
 *build* time, not read at runtime, so changing it requires a redeploy, and verifying it took effect
 means checking the actual bundled JS, not just the env var setting).

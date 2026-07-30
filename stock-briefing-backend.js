@@ -55,6 +55,9 @@ const { applyPositionAwareAdvice } = require('./positionAdvice.js');
 const { getEarningsSurpriseSignal } = require('./earningsSurpriseScore.js');
 const { extractCompanyEvents } = require('./companyEventsScore.js');
 const { explainPriceMove } = require('./priceMoveExplainer.js');
+const { parsePositionsCsv } = require('./positionImport.js');
+const etradeAuth = require('./etradeAuth.js');
+const etradeSync = require('./etradeSync.js');
 const {
   getInsiderBuyingTrackRecord,
   getCongressTradingTrackRecord,
@@ -906,7 +909,10 @@ function normalize(meta, raw) {
 }
 
 const app = express();
-app.use(express.json());
+// Default 100kb limit is too small for a full brokerage transaction-history
+// CSV (see positionImport.js) pasted into a JSON body — a few years of
+// trades can run past that easily.
+app.use(express.json({ limit: '5mb' }));
 app.use(cors());
 
 // Tracked stocks + cost-basis positions live in tracked_companies (Postgres)
@@ -1146,6 +1152,20 @@ app.get('/api/stocks', async (req, res) => {
   res.json(await getTrackedStocks());
 });
 
+// Shared by POST /api/stocks and the CSV/E*TRADE position-import apply
+// route below — both need "start tracking a new ticker" to behave
+// identically (same CIK auto-resolution, same upsert).
+async function trackNewTicker(ticker, name) {
+  const { cik, secName } = await resolveCikForTicker(ticker);
+  const stockName = name || secName || ticker;
+  await dbPool.query(
+    `INSERT INTO tracked_companies (ticker, company_name, cik)
+     VALUES ($1, $2, $3)
+     ON CONFLICT (ticker) DO UPDATE SET company_name = EXCLUDED.company_name, cik = EXCLUDED.cik, updated_at = NOW()`,
+    [ticker, stockName, cik]
+  );
+}
+
 app.post('/api/stocks', async (req, res) => {
   const { ticker, name } = req.body;
   if (!ticker) return res.status(400).json({ error: 'Ticker required' });
@@ -1154,15 +1174,7 @@ app.post('/api/stocks', async (req, res) => {
   const exists = await getTrackedStock(upperTicker);
   if (exists) return res.status(400).json({ error: 'Stock already tracked' });
 
-  const { cik, secName } = await resolveCikForTicker(upperTicker);
-  const stockName = name || secName || ticker;
-
-  await dbPool.query(
-    `INSERT INTO tracked_companies (ticker, company_name, cik)
-     VALUES ($1, $2, $3)
-     ON CONFLICT (ticker) DO UPDATE SET company_name = EXCLUDED.company_name, cik = EXCLUDED.cik, updated_at = NOW()`,
-    [upperTicker, stockName, cik]
-  );
+  await trackNewTicker(upperTicker, name);
 
   res.json(await getTrackedStocks());
 });
@@ -1200,6 +1212,127 @@ app.delete('/api/stocks/:ticker/position', async (req, res) => {
   if (!stock) return res.status(404).json({ error: 'Ticker not tracked', ticker });
 
   res.json(await clearPosition(ticker));
+});
+
+// Brokerage position import — Robinhood has no official API, so this is the
+// credential-free path: the user exports their own CSV from Robinhood (or
+// any brokerage) and uploads it here. Preview never writes anything; the
+// user reviews/edits the parsed result in the UI and only /apply commits it.
+app.post('/api/positions/preview-csv', async (req, res) => {
+  const { csvText } = req.body;
+  if (!csvText || typeof csvText !== 'string') {
+    return res.status(400).json({ error: 'csvText required' });
+  }
+
+  const { format, positions, warnings } = parsePositionsCsv(csvText);
+
+  const withTrackedStatus = await Promise.all(positions.map(async p => ({
+    ...p,
+    isTracked: !!(await getTrackedStock(p.ticker)),
+  })));
+
+  res.json({ format, positions: withTrackedStatus, warnings });
+});
+
+// E*TRADE connection (OAuth 1.0a — see etradeAuth.js). Read-only: this only
+// ever calls E*TRADE's accounts-list and portfolio endpoints, never an
+// order/trading endpoint, and everything it finds still goes through the
+// same review-then-apply flow as CSV import (POST /api/positions/apply) —
+// nothing is written to tracked_companies just from connecting.
+app.get('/api/etrade/status', async (req, res) => {
+  const connection = await etradeAuth.getConnection();
+  res.json({
+    configured: etradeAuth.isConfigured(),
+    live: etradeAuth.isLive,
+    connected: connection?.status === 'connected',
+    connectedAt: connection?.connected_at || null,
+  });
+});
+
+app.post('/api/etrade/connect', async (req, res) => {
+  if (!etradeAuth.isConfigured()) {
+    return res.status(400).json({ error: 'ETRADE_CONSUMER_KEY/ETRADE_CONSUMER_SECRET aren\'t set yet — see Settings for setup steps.' });
+  }
+  try {
+    const { authorizeUrl } = await etradeAuth.getRequestToken();
+    res.json({ authorizeUrl });
+  } catch (err) {
+    console.error('[etrade/connect]', err.response?.data || err.message);
+    res.status(500).json({ error: 'Failed to start E*TRADE authorization.' });
+  }
+});
+
+app.post('/api/etrade/verify', async (req, res) => {
+  const { verifierCode } = req.body;
+  if (!verifierCode) return res.status(400).json({ error: 'verifierCode required' });
+
+  try {
+    await etradeAuth.completeAuthorization(verifierCode);
+    res.json({ connected: true });
+  } catch (err) {
+    console.error('[etrade/verify]', err.response?.data || err.message);
+    const msg = err.message === 'NO_PENDING_REQUEST'
+      ? 'No pending E*TRADE connection found — click Connect again first.'
+      : 'Failed to complete E*TRADE authorization — double check the code.';
+    res.status(400).json({ error: msg });
+  }
+});
+
+app.post('/api/etrade/disconnect', async (req, res) => {
+  await etradeAuth.disconnect();
+  res.json({ connected: false });
+});
+
+app.get('/api/etrade/positions', async (req, res) => {
+  try {
+    const { positions, warnings } = await etradeSync.getAllPositions();
+    const withTrackedStatus = await Promise.all(positions.map(async p => ({
+      ...p,
+      isTracked: !!(await getTrackedStock(p.ticker)),
+    })));
+    res.json({ positions: withTrackedStatus, warnings });
+  } catch (err) {
+    console.error('[etrade/positions]', err.response?.data || err.message);
+    const msg = err.message === 'NOT_CONNECTED'
+      ? 'Not connected to E*TRADE yet.'
+      : 'Failed to fetch E*TRADE positions — see server logs.';
+    res.status(err.message === 'NOT_CONNECTED' ? 400 : 500).json({ error: msg });
+  }
+});
+
+app.post('/api/positions/apply', async (req, res) => {
+  const { positions } = req.body;
+  if (!Array.isArray(positions) || positions.length === 0) {
+    return res.status(400).json({ error: 'positions array required' });
+  }
+
+  const applied = [];
+  const skipped = [];
+
+  for (const p of positions) {
+    const ticker = String(p.ticker || '').toUpperCase();
+    const shares = Number(p.shares);
+    const costPerShare = Number(p.costPerShare);
+
+    if (!ticker || !Number.isFinite(shares) || shares <= 0 || !Number.isFinite(costPerShare) || costPerShare <= 0) {
+      skipped.push({ ticker: ticker || '(blank)', reason: 'Invalid ticker, shares, or cost per share.' });
+      continue;
+    }
+
+    let stock = await getTrackedStock(ticker);
+    if (!stock) {
+      if (!p.track) {
+        skipped.push({ ticker, reason: 'Not tracked and "track this stock" wasn\'t checked.' });
+        continue;
+      }
+      await trackNewTicker(ticker, p.companyName);
+    }
+
+    await setPosition(ticker, costPerShare, shares);
+    applied.push(ticker);
+  }
+
+  res.json({ applied, skipped, stocks: await getTrackedStocks() });
 });
 
 // Per-stock summary feeding the Dashboard's ticker grid — name kept as
@@ -1654,5 +1787,29 @@ app.post('/api/internal/snapshot-scores', async (req, res) => {
   }
 });
 
+// Every other table in this app is created by the Python fetch scripts
+// (each does its own `CREATE TABLE IF NOT EXISTS` on run) — this is the
+// first table the Node backend itself owns, so it gets the same idempotent
+// pattern rather than a separate migrations setup for one table.
+async function ensureSchema() {
+  await dbPool.query(`
+    CREATE TABLE IF NOT EXISTS broker_connections (
+      provider TEXT PRIMARY KEY,
+      status TEXT NOT NULL DEFAULT 'pending',
+      request_token TEXT,
+      request_token_secret TEXT,
+      access_token TEXT,
+      access_token_secret TEXT,
+      connected_at TIMESTAMPTZ,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
+}
+
 const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => console.log(`Backend running on port ${PORT}`));
+ensureSchema()
+  .then(() => app.listen(PORT, () => console.log(`Backend running on port ${PORT}`)))
+  .catch(err => {
+    console.error('Failed to ensure DB schema on startup:', err);
+    process.exit(1);
+  });
