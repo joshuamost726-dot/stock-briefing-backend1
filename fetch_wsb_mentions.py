@@ -19,6 +19,7 @@ Usage:
   python fetch_wsb_mentions.py
 """
 
+import argparse
 import os
 import sys
 import time
@@ -148,6 +149,10 @@ def upsert_row(conn, ticker, snapshot_date, row):
 # --- Main --------------------------------------------------------------
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--ticker", help="Scope this run to a single ticker (on-demand backfill for a newly tracked stock) instead of the full tracked list.")
+    args = parser.parse_args()
+
     if not DATABASE_URL:
         print("ERROR: DATABASE_URL environment variable not set.")
         sys.exit(1)
@@ -164,6 +169,8 @@ def main():
     today = date.today()
     success_count = 0
     tickers = get_tracked_tickers(conn)
+    if args.ticker:
+        tickers = [t for t in tickers if t.upper() == args.ticker.upper()]
 
     for ticker in tickers:
         row = by_ticker.get(ticker)

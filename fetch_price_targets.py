@@ -12,6 +12,7 @@ Notes:
   or nonexistent US analyst coverage.
 """
 
+import argparse
 import os
 import sys
 from datetime import date
@@ -86,6 +87,10 @@ def insert_row(conn, row):
 
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--ticker", help="Scope this run to a single ticker (on-demand backfill for a newly tracked stock) instead of the full tracked list.")
+    args = parser.parse_args()
+
     if not DATABASE_URL:
         print("ERROR: DATABASE_URL environment variable not set.")
         sys.exit(1)
@@ -93,6 +98,8 @@ def main():
     conn = psycopg2.connect(DATABASE_URL)
     success_count = 0
     tickers = get_tracked_tickers(conn)
+    if args.ticker:
+        tickers = [t for t in tickers if t.upper() == args.ticker.upper()]
 
     for ticker in tickers:
         print(f"\n--- {ticker} ---")

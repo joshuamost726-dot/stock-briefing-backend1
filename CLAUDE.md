@@ -230,6 +230,38 @@ Two layers, deliberately redundant since they catch different failure modes:
    per-ticker `try/except` swallowed without failing the job. **Lesson: a workflow's "success" status
    is not proof data actually landed — check the database directly when it matters.**
 
+### On-demand single-ticker backfill (added 2026-07-31)
+
+A newly tracked stock only has 2 live-fetched signals (analyst rating, earnings surprise) until the
+9 per-ticker-independent Python fetch scripts next run on their own schedule — up to a day away.
+`githubBackfill.js` closes that gap: `trackNewTicker()` (shared by `POST /api/stocks` and
+`POST /api/positions/apply`'s auto-track path) fires an unawaited `triggerBackfill(ticker)` call
+that hits GitHub's `workflow_dispatch` API for 9 workflows with a `ticker` input, reusing the exact
+same fetch scripts rather than duplicating any logic in Node (Render's Node service has no Python
+runtime — GitHub Actions runners already do). Each of those 9 scripts now accepts an optional
+`--ticker` flag (`if args.ticker: tickers = [t for t in tickers if t.upper() == args.ticker.upper()]`)
+that scopes its normal `get_tracked_tickers()`/`get_tracked_ciks()` loop to one symbol; an empty
+`--ticker ""` (what the scheduled/no-input runs pass) is falsy in Python, so the normal full-list
+behavior is unchanged. `fetch_form4.py` additionally switches from `--backfill 7` (incremental) to
+`--backfill 365` when a ticker is given, since a brand-new ticker has zero history to be incremental
+against.
+
+**Deliberately excluded: institutional buying (13F, `sweep_13f.py`).** That script works by scanning
+each smart-money watchlist fund's entire quarterly filing for holdings, not by ticker — there's no
+"just check this one stock" shortcut, the expensive part (parsing every fund's full 13F) happens
+regardless of which ticker you care about. It stays tied to the real quarterly SEC filing cycle
+(sweep runs ~45 days after each quarter end) no matter what. Korea-only scripts (`fetch_korea_*`)
+are also excluded — they only ever apply to SKHY, already covered by the scheduled runs.
+
+Fire-and-forget by design: `trackNewTicker()` doesn't await `triggerBackfill()`, so a slow or failed
+GitHub dispatch never blocks or fails the "start tracking this stock" request itself, and
+`Promise.allSettled` means one bad dispatch doesn't stop the other 8 from firing. `GET
+/api/backfill/status` reports whether `GITHUB_ACTIONS_PAT` is configured at all (frontend uses this
+to show accurate copy on `/buy`'s "not tracked yet" banner — "ready in a few minutes" vs "up to a
+day," depending). **Not yet exercised end-to-end against a real workflow dispatch** — verified the
+non-configured path (graceful skip, correct logging) and that every modified script/workflow is
+syntactically valid, but actually firing a dispatch needs the user's own `GITHUB_ACTIONS_PAT`.
+
 ## Environment variables
 
 Backend (Render): `FINNHUB_API_KEY`, `NEWS_API_KEY`, `DATABASE_URL` (Neon connection string),
@@ -238,7 +270,10 @@ everywhere), `ALPHA_VANTAGE_KEY` (documented but not currently called by any cod
 `ETRADE_CONSUMER_KEY`/`ETRADE_CONSUMER_SECRET` (optional — without them, Settings' Connect E*TRADE
 section shows setup instructions instead of a working Connect button; see "Brokerage position
 import" above), `ETRADE_ENV` (optional, defaults to `sandbox`; must be explicitly `live` to touch a
-real account). Frontend
+real account), `GITHUB_ACTIONS_PAT` (optional — without it, on-demand single-ticker backfill is
+skipped and logged, tracking a new stock still works fine via the normal schedule; see "On-demand
+single-ticker backfill" above), `ACCESS_CODE` (optional — without it, the access-code gate is a
+no-op; see AccessGate.jsx on the frontend). Frontend
 (Vercel): `REACT_APP_API_URL` (must point at the Render backend's URL — this is baked in at React
 *build* time, not read at runtime, so changing it requires a redeploy, and verifying it took effect
 means checking the actual bundled JS, not just the env var setting).

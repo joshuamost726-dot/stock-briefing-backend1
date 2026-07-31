@@ -18,6 +18,7 @@ Notes:
   contract data only applies to US-domiciled entities in Quiver's coverage.
 """
 
+import argparse
 import os
 import sys
 
@@ -123,6 +124,10 @@ def replace_ticker_rows(conn, ticker, rows):
 # --- Main --------------------------------------------------------------
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--ticker", help="Scope this run to a single ticker (on-demand backfill for a newly tracked stock) instead of the full tracked list.")
+    args = parser.parse_args()
+
     if not DATABASE_URL:
         print("ERROR: DATABASE_URL environment variable not set.")
         sys.exit(1)
@@ -137,7 +142,11 @@ def main():
 
     total = 0
 
-    for ticker in get_tracked_tickers(conn):
+    tickers = get_tracked_tickers(conn)
+    if args.ticker:
+        tickers = [t for t in tickers if t.upper() == args.ticker.upper()]
+
+    for ticker in tickers:
         print(f"\n--- {ticker} ---")
         try:
             raw_rows = fetch_gov_contracts(ticker)

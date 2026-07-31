@@ -6,6 +6,10 @@ on:
     # same window as the other daily yfinance-based fetch jobs.
     - cron: '15 21 * * 1-5'
   workflow_dispatch:
+    inputs:
+      ticker:
+        description: 'Scope to one ticker (on-demand backfill for a newly tracked stock) — leave blank for the normal full-list run'
+        required: false
 
 jobs:
   fetch-technical-prices:
@@ -25,7 +29,7 @@ jobs:
       - name: Run technical price history fetch
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
-        run: python fetch_technical_prices.py
+        run: python fetch_technical_prices.py --ticker "${{ github.event.inputs.ticker }}"
 
       - name: Ping healthchecks.io (success)
         if: success()

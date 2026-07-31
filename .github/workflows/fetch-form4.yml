@@ -4,6 +4,10 @@ on:
   schedule:
     - cron: '0 12 * * *'   # daily at 12:00 UTC (8am ET)
   workflow_dispatch:        # allows manual trigger from the Actions tab too
+    inputs:
+      ticker:
+        description: 'Scope to one ticker (on-demand backfill for a newly tracked stock) — leave blank for the normal full-list run'
+        required: false
 
 jobs:
   fetch-form4:
@@ -20,10 +24,15 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Run Form 4 fetch (last 7 days)
+      - name: Run Form 4 fetch (last 7 days, or a full year for an on-demand single-ticker backfill)
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
-        run: python fetch_form4.py --backfill 7
+        run: |
+          if [ -n "${{ github.event.inputs.ticker }}" ]; then
+            python fetch_form4.py --backfill 365 --ticker "${{ github.event.inputs.ticker }}"
+          else
+            python fetch_form4.py --backfill 7
+          fi
 
       - name: Ping healthchecks.io (success)
         if: success()

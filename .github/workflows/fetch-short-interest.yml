@@ -8,6 +8,10 @@ on:
     - cron: '0 14 5 * *'    # 5th of each month, 2pm UTC
     - cron: '0 14 20 * *'   # 20th of each month, 2pm UTC
   workflow_dispatch:         # allows manual trigger from the Actions tab too
+    inputs:
+      ticker:
+        description: 'Scope to one ticker (on-demand backfill for a newly tracked stock) — leave blank for the normal full-list run'
+        required: false
 
 jobs:
   fetch-short-interest:
@@ -27,7 +31,7 @@ jobs:
       - name: Run short interest fetch
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
-        run: python fetch_short_interest.py
+        run: python fetch_short_interest.py --ticker "${{ github.event.inputs.ticker }}"
 
       - name: Ping healthchecks.io (success)
         if: success()

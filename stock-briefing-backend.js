@@ -59,6 +59,7 @@ const { explainPriceMove } = require('./priceMoveExplainer.js');
 const { parsePositionsCsv } = require('./positionImport.js');
 const etradeAuth = require('./etradeAuth.js');
 const etradeSync = require('./etradeSync.js');
+const { triggerBackfill, isConfigured: isBackfillConfigured } = require('./githubBackfill.js');
 const {
   getInsiderBuyingTrackRecord,
   getCongressTradingTrackRecord,
@@ -1198,6 +1199,10 @@ async function trackNewTicker(ticker, name) {
      ON CONFLICT (ticker) DO UPDATE SET company_name = EXCLUDED.company_name, cik = EXCLUDED.cik, updated_at = NOW()`,
     [ticker, stockName, cik]
   );
+
+  // Deliberately not awaited — see githubBackfill.js. The stock is already
+  // tracked at this point regardless of whether the backfill succeeds.
+  triggerBackfill(ticker).catch(err => console.error(`[backfill] Unexpected error for ${ticker}:`, err));
 }
 
 app.post('/api/stocks', async (req, res) => {
@@ -1273,6 +1278,10 @@ app.post('/api/positions/preview-csv', async (req, res) => {
 // order/trading endpoint, and everything it finds still goes through the
 // same review-then-apply flow as CSV import (POST /api/positions/apply) —
 // nothing is written to tracked_companies just from connecting.
+app.get('/api/backfill/status', (req, res) => {
+  res.json({ configured: isBackfillConfigured() });
+});
+
 app.get('/api/etrade/status', async (req, res) => {
   const connection = await etradeAuth.getConnection();
   res.json({

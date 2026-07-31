@@ -186,6 +186,7 @@ def insert_transactions(conn, transactions, filed_at):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--backfill", type=int, default=7)
+    parser.add_argument("--ticker", help="Scope this run to a single ticker (on-demand backfill for a newly tracked stock) instead of the full tracked list.")
     args = parser.parse_args()
 
     if not DATABASE_URL:
@@ -195,7 +196,11 @@ def main():
     conn = psycopg2.connect(DATABASE_URL)
     total_inserted = 0
 
-    for ticker, cik in get_tracked_ciks(conn).items():
+    ciks = get_tracked_ciks(conn)
+    if args.ticker:
+        ciks = {t: c for t, c in ciks.items() if t.upper() == args.ticker.upper()}
+
+    for ticker, cik in ciks.items():
         print(f"\n--- {ticker} (CIK {cik}) ---")
         try:
             filings = get_filing_index(cik, args.backfill)

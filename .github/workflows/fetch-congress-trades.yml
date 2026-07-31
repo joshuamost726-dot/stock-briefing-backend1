@@ -5,6 +5,10 @@ on:
     # 10pm UTC = 6pm ET (after market close), Monday-Friday only
     - cron: '0 22 * * 1-5'
   workflow_dispatch:   # allows manual trigger from the Actions tab too
+    inputs:
+      ticker:
+        description: 'Scope to one ticker (on-demand backfill for a newly tracked stock) — leave blank for the normal full-list run'
+        required: false
 
 jobs:
   fetch-congress-trades:
@@ -25,7 +29,7 @@ jobs:
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           QUIVER_API_KEY: ${{ secrets.QUIVER_API_KEY }}
-        run: python fetch_congress_trades.py
+        run: python fetch_congress_trades.py --ticker "${{ github.event.inputs.ticker }}"
 
       - name: Ping healthchecks.io (success)
         if: success()
